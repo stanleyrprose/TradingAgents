@@ -3,7 +3,9 @@ import sys
 from datetime import date
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
+
+import pytest
 
 from tradingagents.dataflows.option_selector import OptionCandidate, OptionSelectionResult
 
@@ -56,6 +58,43 @@ def _profile(symbol: str):
         pipeline_asset_type="stock",
         analysts=("market", "news"),
     )
+
+
+def _underlying_profile(symbol: str = "AAPL"):
+    return SimpleNamespace(
+        primary_type="stock",
+        asset_class="equity",
+        instrument_kind="stock",
+        can_run=True,
+        canonical_symbol=symbol,
+        analysis_symbol=symbol,
+        pipeline_asset_type="stock",
+        analysts=("market", "news"),
+    )
+
+
+def _option_profile(symbol: str):
+    return SimpleNamespace(
+        primary_type="option",
+        asset_class="option",
+        instrument_kind="option",
+        can_run=True,
+        canonical_symbol=symbol,
+        analysis_symbol="AAPL",
+        pipeline_asset_type="stock",
+        analysts=("market", "news"),
+    )
+
+
+def _auto_classify(symbol: str):
+    return _underlying_profile() if symbol.upper() == "AAPL" else _option_profile(symbol)
+
+
+def _graph(final_state, decision, report_path):
+    graph = MagicMock()
+    graph.propagate.return_value = (final_state, decision)
+    graph.save_reports.return_value = report_path
+    return graph
 
 
 def test_unavailable_prints_report_and_never_imports_graph(capsys):
@@ -160,3 +199,234 @@ def test_graph_decision_never_rewrites_selected_direction():
         classify.assert_called_once_with(candidate.symbol)
         graph.propagate.assert_called_once()
         assert graph.propagate.call_args.args[0] == candidate.symbol
+
+
+def test_auto_bullish_analyzes_exact_call_with_fresh_graph_and_saves_both_reports():
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    underlying_state = {
+        "trader_investment_plan": "FINAL TRANSACTION PROPOSAL: BUY",
+        "underlying": True,
+    }
+    underlying_graph = _graph(underlying_state, "Overweight", "/tmp/underlying")
+    option_graph = _graph({"option": True}, "SELL", "/tmp/option")
+    graph_factory = MagicMock(side_effect=(underlying_graph, option_graph))
+    config_factory = MagicMock(return_value={"config": True})
+
+    with (
+        patch.object(module, "_graph_dependencies", return_value=(graph_factory, config_factory)),
+        patch.object(module, "classify_instrument", side_effect=_auto_classify),
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult((candidate,), "CALL SELECTION"),
+        ) as selector,
+    ):
+        rc = module.main(
+            [
+                "AAPL",
+                "--auto-direction",
+                "--date",
+                "2026-09-10",
+                "--min-dte",
+                "10",
+                "--max-dte",
+                "30",
+                "--target-delta",
+                "0.6",
+                "--top",
+                "3",
+            ]
+        )
+
+    assert rc == 0
+    selector.assert_called_once_with(
+        "AAPL", "bullish", "2026-09-10", min_dte=10, max_dte=30, target_delta=0.6, top_n=3
+    )
+    assert graph_factory.call_count == 2
+    underlying_graph.propagate.assert_called_once_with(
+        "AAPL", "2026-09-10", asset_type="stock", analysis_symbol="AAPL"
+    )
+    underlying_graph.save_reports.assert_called_once_with(underlying_state, "AAPL")
+    option_graph.propagate.assert_called_once_with(
+        candidate.symbol, "2026-09-10", asset_type="stock", analysis_symbol="AAPL"
+    )
+    option_graph.save_reports.assert_called_once_with({"option": True}, candidate.symbol)
+
+
+def test_auto_bearish_analyzes_exact_put_without_rewriting_direction():
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918P00200000")
+    underlying_state = {"trader_investment_plan": "FINAL TRANSACTION PROPOSAL: SELL"}
+    underlying_graph = _graph(underlying_state, "Underweight", "/tmp/underlying")
+    option_graph = _graph({"put": True}, "BUY", "/tmp/put")
+    graph_factory = MagicMock(side_effect=(underlying_graph, option_graph))
+
+    with (
+        patch.object(module, "_graph_dependencies", return_value=(graph_factory, MagicMock())),
+        patch.object(module, "classify_instrument", side_effect=_auto_classify),
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult((candidate,), "PUT SELECTION"),
+        ) as selector,
+    ):
+        assert module.main(["AAPL", "--auto-direction"]) == 0
+
+    selector.assert_called_once()
+    assert selector.call_args.args[1] == "bearish"
+    assert graph_factory.call_count == 2
+    option_graph.propagate.assert_called_once()
+    assert option_graph.propagate.call_args.args[0] == candidate.symbol
+
+
+def test_auto_neutral_hold_saves_underlying_report_without_selecting_options():
+    module = _load_pipeline()
+    state = {"trader_investment_plan": "FINAL TRANSACTION PROPOSAL: HOLD"}
+    underlying_graph = _graph(state, "Hold", "/tmp/neutral")
+    graph_factory = MagicMock(return_value=underlying_graph)
+
+    with (
+        patch.object(module, "_graph_dependencies", return_value=(graph_factory, MagicMock())),
+        patch.object(module, "classify_instrument", return_value=_underlying_profile()),
+        patch.object(module, "rank_equity_option_contracts") as selector,
+    ):
+        assert module.main(["AAPL", "--auto-direction"]) == 0
+
+    underlying_graph.save_reports.assert_called_once_with(state, "AAPL")
+    selector.assert_not_called()
+    graph_factory.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("decision", "trader_plan"),
+    [
+        ("Underweight", "FINAL TRANSACTION PROPOSAL: HOLD"),
+        ("Overweight", "FINAL TRANSACTION PROPOSAL: HOLD"),
+        ("Buy", "FINAL TRANSACTION PROPOSAL: SELL"),
+        ("Sell", "FINAL TRANSACTION PROPOSAL: BUY"),
+        ("Buy", "The trader might buy after further review."),
+        ("REVIEW", "FINAL TRANSACTION PROPOSAL: BUY"),
+    ],
+)
+def test_auto_conservative_no_trade_never_selects_or_constructs_option_graph(decision, trader_plan):
+    module = _load_pipeline()
+    state = {"trader_investment_plan": trader_plan}
+    graph_factory = MagicMock(return_value=_graph(state, decision, "/tmp/no-trade"))
+
+    with (
+        patch.object(module, "_graph_dependencies", return_value=(graph_factory, MagicMock())),
+        patch.object(module, "classify_instrument", return_value=_underlying_profile()),
+        patch.object(module, "rank_equity_option_contracts") as selector,
+    ):
+        assert module.main(["AAPL", "--auto-direction"]) == 0
+
+    selector.assert_not_called()
+    graph_factory.assert_called_once()
+
+
+@pytest.mark.parametrize("symbol", ["BTCUSD", "GC=F"])
+def test_auto_invalid_non_equity_returns_before_graph_dependencies_and_selector(symbol, capsys):
+    module = _load_pipeline()
+    invalid_profile = SimpleNamespace(
+        primary_type="crypto" if symbol == "BTCUSD" else "future",
+        asset_class="crypto" if symbol == "BTCUSD" else "commodity",
+        instrument_kind="crypto" if symbol == "BTCUSD" else "future",
+        can_run=True,
+        canonical_symbol=symbol,
+    )
+    with (
+        patch.object(module, "classify_instrument", return_value=invalid_profile),
+        patch.object(module, "_graph_dependencies") as dependencies,
+        patch.object(module, "rank_equity_option_contracts") as selector,
+    ):
+        assert module.main([symbol, "--auto-direction"]) == 2
+
+    dependencies.assert_not_called()
+    selector.assert_not_called()
+    assert capsys.readouterr().out == (
+        "<underlying thesis unavailable: auto-direction requires a runnable US "
+        "equity stock or equity fund with a 1-6 letter Cboe symbol>\n"
+    )
+
+
+def test_historical_auto_direction_passes_date_then_stops_on_unavailable_chain():
+    module = _load_pipeline()
+    state = {"trader_investment_plan": "FINAL TRANSACTION PROPOSAL: BUY"}
+    underlying_graph = _graph(state, "Buy", "/tmp/historical")
+    graph_factory = MagicMock(return_value=underlying_graph)
+    unavailable = OptionSelectionResult((), "<unavailable>", "current chain unavailable")
+
+    with (
+        patch.object(module, "_graph_dependencies", return_value=(graph_factory, MagicMock())),
+        patch.object(module, "classify_instrument", return_value=_underlying_profile()),
+        patch.object(module, "rank_equity_option_contracts", return_value=unavailable) as selector,
+    ):
+        assert module.main(["AAPL", "--auto-direction", "--date", "2026-09-09"]) == 2
+
+    selector.assert_called_once_with(
+        "AAPL", "bullish", "2026-09-09", min_dte=7, max_dte=45, target_delta=0.55, top_n=5
+    )
+    underlying_graph.propagate.assert_called_once_with(
+        "AAPL", "2026-09-09", asset_type="stock", analysis_symbol="AAPL"
+    )
+    graph_factory.assert_called_once()
+
+
+def test_historical_neutral_auto_direction_never_calls_selector():
+    module = _load_pipeline()
+    graph_factory = MagicMock(
+        return_value=_graph(
+            {"trader_investment_plan": "FINAL TRANSACTION PROPOSAL: HOLD"},
+            "Hold",
+            "/tmp/historical-neutral",
+        )
+    )
+    with (
+        patch.object(module, "_graph_dependencies", return_value=(graph_factory, MagicMock())),
+        patch.object(module, "classify_instrument", return_value=_underlying_profile()),
+        patch.object(module, "rank_equity_option_contracts") as selector,
+    ):
+        assert module.main(["AAPL", "--auto-direction", "--date", "2026-09-09"]) == 0
+
+    selector.assert_not_called()
+    graph_factory.assert_called_once()
+
+
+def test_manual_direction_remains_selector_first_with_one_option_graph():
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    events = []
+    option_graph = _graph({"manual": True}, "BUY", "/tmp/manual")
+    graph_factory = MagicMock(return_value=option_graph)
+
+    def select(*args, **kwargs):
+        events.append("selector")
+        return OptionSelectionResult((candidate,), "MANUAL")
+
+    def dependencies():
+        events.append("dependencies")
+        return graph_factory, MagicMock()
+
+    with (
+        patch.object(module, "rank_equity_option_contracts", side_effect=select) as selector,
+        patch.object(module, "_graph_dependencies", side_effect=dependencies),
+        patch.object(module, "classify_instrument", side_effect=_option_profile) as classify,
+    ):
+        assert module.main(["AAPL", "--direction", "bullish"]) == 0
+
+    assert events == ["selector", "dependencies"]
+    selector.assert_called_once()
+    classify.assert_called_once_with(candidate.symbol)
+    graph_factory.assert_called_once()
+    option_graph.propagate.assert_called_once_with(
+        candidate.symbol, ANY, asset_type="stock", analysis_symbol="AAPL"
+    )
+
+
+def test_direction_arguments_are_mutually_exclusive_and_required():
+    parser = _load_pipeline()._parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["AAPL"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["AAPL", "--direction", "bullish", "--auto-direction"])
