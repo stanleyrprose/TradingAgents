@@ -11,6 +11,10 @@ from tradingagents.option_capital_allocator import (
     allocate_long_option_premium_risk,
     resolve_long_option_risk_budget,
 )
+from tradingagents.option_exposure_guard import (
+    evaluate_long_option_exposure,
+    resolve_option_exposure_limits,
+)
 from tradingagents.option_thesis_gate import gate_long_option_purchase, gate_option_thesis
 
 _CBOE_UNDERLYING_RE = re.compile(r"[A-Z]{1,6}")
@@ -35,6 +39,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--account-equity", type=float)
     parser.add_argument("--max-risk-pct", type=float)
     parser.add_argument("--premium-budget", type=float)
+    parser.add_argument("--max-abs-delta-shares", type=float)
+    parser.add_argument("--max-abs-gamma-delta-shares-per-dollar", type=float)
+    parser.add_argument("--max-abs-vega-dollars-per-vol-point", type=float)
+    parser.add_argument("--max-abs-theta-dollars-per-day", type=float)
     return parser
 
 
@@ -150,6 +158,30 @@ def main(argv: list[str] | None = None) -> int:
             print(f"option sizing error: {exc}")
             return 2
 
+    raw_exposure_limits = {
+        "max_abs_delta_shares": args.max_abs_delta_shares,
+        "max_abs_gamma_delta_shares_per_dollar": (
+            args.max_abs_gamma_delta_shares_per_dollar
+        ),
+        "max_abs_vega_dollars_per_vol_point": (
+            args.max_abs_vega_dollars_per_vol_point
+        ),
+        "max_abs_theta_dollars_per_day": args.max_abs_theta_dollars_per_day,
+    }
+    exposure_limits_enabled = any(
+        value is not None for value in raw_exposure_limits.values()
+    )
+    try:
+        exposure_limits = resolve_option_exposure_limits(**raw_exposure_limits)
+    except ValueError as exc:
+        print(f"option exposure limit error: {exc}")
+        return 2
+    if exposure_limits_enabled and not sizing_enabled:
+        print(
+            "option exposure limit error: Greek limits require option sizing inputs"
+        )
+        return 2
+
     graph_factory = config_factory = None
     if args.auto_direction:
         direction, selector_underlying, graph_factory, config_factory, rc = _auto_direction(args)
@@ -200,6 +232,22 @@ def main(argv: list[str] | None = None) -> int:
     print(allocation.report)
     if allocation.available and not allocation.has_position:
         print("NO OPTION POSITION: 0 whole contracts fit within the risk budget.")
+        return analysis_rc
+    if allocation.has_position:
+        exposure = evaluate_long_option_exposure(
+            approved_candidates,
+            allocation,
+            underlying_spot=selection.underlying_spot,
+            **exposure_limits,
+        )
+        print(exposure.report)
+        if exposure_limits_enabled and (
+            exposure.status == "BLOCK" or not exposure.available
+        ):
+            print("NO OPTION POSITION: blocked by explicit option exposure limits.")
+        elif not exposure_limits_enabled and not exposure.available:
+            reason = exposure.unavailable_reason or "option exposure report unavailable"
+            print(f"option exposure warning: {reason}")
     return analysis_rc
 
 

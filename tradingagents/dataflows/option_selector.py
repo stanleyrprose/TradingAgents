@@ -52,6 +52,8 @@ class OptionCandidate:
     required_move: float
     components: tuple[tuple[str, float, float], ...]
     score: float
+    gamma: float | None = None
+    vega: float | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class OptionSelectionResult:
     candidates: tuple[OptionCandidate, ...]
     report: str
     unavailable_reason: str | None = None
+    underlying_spot: float | None = None
 
     @property
     def available(self) -> bool:
@@ -157,6 +160,8 @@ def _eligible_candidates(
         oi = _nonnegative(row, "open_interest")
         volume = _nonnegative(row, "volume")
         theta = _row_number(row, "theta")
+        gamma = _row_number(row, "gamma")
+        vega = _row_number(row, "vega")
         if None in (bid, ask, iv, delta, oi, volume) or ask < bid:
             continue
         if (right == "C" and delta <= 0) or (right == "P" and delta >= 0):
@@ -195,6 +200,8 @@ def _eligible_candidates(
                 "oi": oi,
                 "volume": volume,
                 "theta": theta,
+                "gamma": gamma,
+                "vega": vega,
                 "theta_burden": abs(theta) / midpoint if theta is not None else None,
                 "breakeven": breakeven,
                 "required_move": required_move,
@@ -460,6 +467,7 @@ def rank_equity_option_contracts(
                 target_delta=float(target_delta),
                 top_n=top_n,
             ),
+            underlying_spot=spot,
         )
     except (requests.RequestException, TypeError, ValueError, OverflowError):
         logger.warning("Cboe option selection failed")

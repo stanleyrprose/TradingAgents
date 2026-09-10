@@ -42,6 +42,22 @@ def _candidate(symbol: str, score: float = 88.5) -> OptionCandidate:
         required_move=0.025,
         components=(),
         score=score,
+        gamma=0.02,
+        vega=0.1,
+    )
+
+
+def _exposure_result(
+    status: str = "REPORT_ONLY",
+    *,
+    available: bool = True,
+    reason: str | None = None,
+):
+    return SimpleNamespace(
+        status=status,
+        available=available,
+        report=f"EXPOSURE {status}",
+        unavailable_reason=reason,
     )
 
 
@@ -444,11 +460,13 @@ def test_sizing_disabled_preserves_output_and_never_calls_allocator(capsys):
         ),
         patch.object(module, "classify_instrument", side_effect=_profile),
         patch.object(module, "allocate_long_option_premium_risk") as allocator,
+        patch.object(module, "evaluate_long_option_exposure") as exposure_guard,
         _install_graph_module(MagicMock(return_value=graph)),
     ):
         assert module.main(["AAPL", "--direction", "bullish"]) == 0
 
     allocator.assert_not_called()
+    exposure_guard.assert_not_called()
     assert capsys.readouterr().out == (
         "LEGACY SELECTION\n"
         f"rank: 1 | symbol: {candidate.symbol} | selector score: 88.50 | "
@@ -719,6 +737,7 @@ def test_unaffordable_approved_contract_is_valid_zero_position(capsys):
             return_value=OptionSelectionResult((candidate,), "SELECTION"),
         ),
         patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(module, "evaluate_long_option_exposure") as exposure_guard,
         _install_graph_module(MagicMock(return_value=graph)),
     ):
         assert module.main(
@@ -728,6 +747,7 @@ def test_unaffordable_approved_contract_is_valid_zero_position(capsys):
     output = capsys.readouterr().out
     assert f"| 1 | {candidate.symbol} | $5.20 | $100.00 | 0 |" in output
     assert "NO OPTION POSITION: 0 whole contracts fit" in output
+    exposure_guard.assert_not_called()
 
 
 def test_sized_auto_no_option_trade_stops_before_selector_and_allocator():
@@ -746,3 +766,403 @@ def test_sized_auto_no_option_trade_stops_before_selector_and_allocator():
 
     selector.assert_not_called()
     allocator.assert_not_called()
+
+
+def test_sized_approved_contract_report_only_guard_forwards_exact_inputs(capsys):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    selection = OptionSelectionResult(
+        (candidate,), "SELECTION", underlying_spot=100.0
+    )
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    with (
+        patch.object(module, "rank_equity_option_contracts", return_value=selection) as selector,
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(
+            module, "allocate_long_option_premium_risk", return_value=allocation
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result(),
+        ) as exposure_guard,
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            ["AAPL", "--direction", "bullish", "--premium-budget", "1000"]
+        ) == 0
+
+    selector.assert_called_once()
+    exposure_guard.assert_called_once_with(
+        [candidate],
+        allocation,
+        underlying_spot=100.0,
+        max_abs_delta_shares=None,
+        max_abs_gamma_delta_shares_per_dollar=None,
+        max_abs_vega_dollars_per_vol_point=None,
+        max_abs_theta_dollars_per_day=None,
+    )
+    output = capsys.readouterr().out
+    assert "EXPOSURE REPORT_ONLY" in output
+    assert "blocked by explicit option exposure limits" not in output
+
+
+@pytest.mark.parametrize("invalid_limit", ["0", "nan", "-1"])
+def test_invalid_explicit_greek_limit_stops_before_selector_and_graph(
+    invalid_limit, capsys
+):
+    module = _load_pipeline()
+    with (
+        patch.object(module, "rank_equity_option_contracts") as selector,
+        patch.object(module, "_graph_dependencies") as dependencies,
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--auto-direction",
+                "--premium-budget",
+                "1000",
+                "--max-abs-delta-shares",
+                invalid_limit,
+            ]
+        ) == 2
+
+    selector.assert_not_called()
+    dependencies.assert_not_called()
+    assert capsys.readouterr().out.startswith("option exposure limit error: ")
+
+
+@pytest.mark.parametrize(
+    "limit_arg",
+    [
+        "--max-abs-delta-shares",
+        "--max-abs-gamma-delta-shares-per-dollar",
+        "--max-abs-vega-dollars-per-vol-point",
+        "--max-abs-theta-dollars-per-day",
+    ],
+)
+def test_explicit_greek_limit_requires_sizing_before_selector_and_graph(
+    limit_arg, capsys
+):
+    module = _load_pipeline()
+    with (
+        patch.object(module, "rank_equity_option_contracts") as selector,
+        patch.object(module, "_graph_dependencies") as dependencies,
+    ):
+        assert module.main(
+            ["AAPL", "--auto-direction", limit_arg, "10"]
+        ) == 2
+
+    selector.assert_not_called()
+    dependencies.assert_not_called()
+    assert "Greek limits require option sizing inputs" in capsys.readouterr().out
+
+
+def test_explicit_exposure_pass_keeps_allocation(capsys):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                (candidate,), "SELECTION", underlying_spot=100.0
+            ),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(module, "allocate_long_option_premium_risk", return_value=allocation),
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result("PASS"),
+        ) as exposure_guard,
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--premium-budget",
+                "1000",
+                "--max-abs-delta-shares",
+                "100",
+            ]
+        ) == 0
+
+    exposure_guard.assert_called_once()
+    output = capsys.readouterr().out
+    assert "ALLOCATION" in output and "EXPOSURE PASS" in output
+    assert "blocked by explicit option exposure limits" not in output
+
+
+def test_explicit_exposure_block_prints_position_message_and_returns_success(capsys):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                (candidate,), "SELECTION", underlying_spot=100.0
+            ),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(module, "allocate_long_option_premium_risk", return_value=allocation),
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result("BLOCK"),
+        ),
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--premium-budget",
+                "1000",
+                "--max-abs-delta-shares",
+                "100",
+            ]
+        ) == 0
+
+    assert (
+        "NO OPTION POSITION: blocked by explicit option exposure limits."
+        in capsys.readouterr().out
+    )
+
+
+def test_explicit_block_preserves_graph_failure_rc_and_guards_only_approved_success(
+    capsys,
+):
+    module = _load_pipeline()
+    failed = _candidate("AAPL260918C00200000")
+    approved = _candidate("AAPL260918C00205000")
+    failed_graph = MagicMock()
+    failed_graph.propagate.side_effect = RuntimeError("analysis failed")
+    approved_graph = _graph(
+        {"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/approved"
+    )
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                (failed, approved), "SELECTION", underlying_spot=100.0
+            ),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(module, "allocate_long_option_premium_risk", return_value=allocation),
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result("BLOCK"),
+        ) as exposure_guard,
+        _install_graph_module(MagicMock(side_effect=(failed_graph, approved_graph))),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--analyze-top",
+                "3",
+                "--premium-budget",
+                "1000",
+                "--max-abs-delta-shares",
+                "100",
+            ]
+        ) == 1
+
+    assert exposure_guard.call_args.args[:2] == ([approved], allocation)
+    assert "blocked by explicit option exposure limits" in capsys.readouterr().out
+
+
+def test_top_three_guard_receives_approved_subset_in_selector_order():
+    module = _load_pipeline()
+    candidates = tuple(
+        _candidate(f"AAPL260918C{strike:08d}", 90 - index)
+        for index, strike in enumerate((200000, 205000, 210000))
+    )
+    graphs = (
+        _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/one"),
+        _graph({"trader_investment_plan": "Action: HOLD"}, "Buy", "/tmp/two"),
+        _graph(
+            {"trader_investment_plan": "Action: BUY"},
+            "Overweight",
+            "/tmp/three",
+        ),
+    )
+    approved = [candidates[0], candidates[2]]
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                candidates, "SELECTION", underlying_spot=100.0
+            ),
+        ) as selector,
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(
+            module, "allocate_long_option_premium_risk", return_value=allocation
+        ) as allocator,
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result(),
+        ) as exposure_guard,
+        _install_graph_module(MagicMock(side_effect=graphs)),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--analyze-top",
+                "3",
+                "--premium-budget",
+                "1200",
+            ]
+        ) == 0
+
+    selector.assert_called_once()
+    allocator.assert_called_once_with(
+        approved,
+        account_equity=None,
+        max_risk_pct=None,
+        premium_budget=1200.0,
+    )
+    assert exposure_guard.call_args.args == (approved, allocation)
+    assert exposure_guard.call_args.kwargs["underlying_spot"] == 100.0
+
+
+@pytest.mark.parametrize(
+    ("underlying_spot", "reason"),
+    [(100.0, "guard unavailable"), (None, "underlying spot unavailable")],
+)
+def test_report_only_unavailable_exposure_warns_without_blocking(
+    underlying_spot, reason, capsys
+):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                (candidate,), "SELECTION", underlying_spot=underlying_spot
+            ),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(module, "allocate_long_option_premium_risk", return_value=allocation),
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result(available=False, reason=reason),
+        ),
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            ["AAPL", "--direction", "bullish", "--premium-budget", "1000"]
+        ) == 0
+
+    output = capsys.readouterr().out
+    assert f"option exposure warning: {reason}" in output
+    assert "blocked by explicit option exposure limits" not in output
+
+
+@pytest.mark.parametrize("underlying_spot", [100.0, None])
+def test_explicit_limits_block_when_exposure_unavailable(underlying_spot, capsys):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                (candidate,), "SELECTION", underlying_spot=underlying_spot
+            ),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(module, "allocate_long_option_premium_risk", return_value=allocation),
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result(available=False, reason="unavailable"),
+        ),
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--premium-budget",
+                "1000",
+                "--max-abs-delta-shares",
+                "100",
+            ]
+        ) == 0
+
+    assert (
+        "NO OPTION POSITION: blocked by explicit option exposure limits."
+        in capsys.readouterr().out
+    )
+
+
+def test_long_put_buy_approval_uses_same_allocator_and_guard_path():
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918P00200000")
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    graph = _graph(
+        {"trader_investment_plan": "FINAL TRANSACTION PROPOSAL: BUY"},
+        "Overweight",
+        "/tmp/put",
+    )
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                (candidate,), "PUT SELECTION", underlying_spot=100.0
+            ),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(
+            module, "allocate_long_option_premium_risk", return_value=allocation
+        ) as allocator,
+        patch.object(
+            module,
+            "evaluate_long_option_exposure",
+            return_value=_exposure_result("PASS"),
+        ) as exposure_guard,
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bearish",
+                "--premium-budget",
+                "1000",
+                "--max-abs-delta-shares",
+                "100",
+            ]
+        ) == 0
+
+    assert allocator.call_args.args == ([candidate],)
+    assert exposure_guard.call_args.args == ([candidate], allocation)
+    assert exposure_guard.call_args.kwargs["underlying_spot"] == 100.0

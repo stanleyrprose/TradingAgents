@@ -32,6 +32,8 @@ def _option(
     oi: float = 500,
     volume: float = 100,
     theta: float | None = -0.05,
+    gamma: float | None = None,
+    vega: float | None = None,
 ) -> dict:
     row = {
         "option": _symbol(expiry, right, strike),
@@ -44,6 +46,10 @@ def _option(
     }
     if theta is not None:
         row["theta"] = theta
+    if gamma is not None:
+        row["gamma"] = gamma
+    if vega is not None:
+        row["vega"] = vega
     return row
 
 
@@ -169,6 +175,32 @@ def test_missing_theta_is_eligible_and_receives_neutral_five_points():
 
     assert "theta unavailable (neutral 5/10 theta points)" in report
     assert "| Theta burden | 5.00 | 10.00 |" in report
+
+
+def test_gamma_and_vega_are_carried_without_affecting_eligibility():
+    raw = _eligible_candidates(
+        [
+            _option("260925", "C", 100, gamma=0.025, vega=0.12),
+            _option("260925", "C", 101),
+        ],
+        underlying="AAPL",
+        right="C",
+        spot=100,
+        today=TODAY,
+        min_dte=7,
+        max_dte=45,
+    )
+    ranked = _rank_candidates(
+        raw, target_delta=0.55, target_dte=21, min_dte=7, max_dte=45
+    )
+    by_symbol = {candidate.symbol: candidate for candidate in ranked}
+
+    with_greeks = by_symbol[_symbol("260925", "C", 100)]
+    without_greeks = by_symbol[_symbol("260925", "C", 101)]
+    assert with_greeks.gamma == 0.025
+    assert with_greeks.vega == 0.12
+    assert without_greeks.gamma is None
+    assert without_greeks.vega is None
 
 
 @pytest.mark.parametrize(("iv", "expected"), [(0.15, 5), (0.30, 2.5), (0.45, 0)])
@@ -346,6 +378,7 @@ def test_structured_result_retains_full_ranking_and_matches_report():
     assert isinstance(result, OptionSelectionResult)
     assert result.available
     assert len(result.candidates) == 4
+    assert result.underlying_spot == 100
     assert all(isinstance(candidate, OptionCandidate) for candidate in result.candidates)
     best = result.candidates[0]
     assert f"**{best.symbol}** — score {best.score:.2f}/100" in result.report
