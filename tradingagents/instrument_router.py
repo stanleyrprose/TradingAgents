@@ -214,6 +214,25 @@ def _analytics(primary: str, asset_class: str, kind: str) -> tuple[str, tuple[st
     return "PARTIAL", analysts, "Missing analytics: " + "; ".join(missing) + "."
 
 
+def _refine_commodity_notes(notes: str, analysis_symbol: str) -> str:
+    """Reflect the commodity curve and EIA coverage available to analysis."""
+    curve_symbols = {"GC=F", "SI=F", "HG=F", "CL=F", "NG=F"}
+    if analysis_symbol not in curve_symbols:
+        return notes
+
+    notes = notes.replace(
+        "futures curve, basis, and roll analytics",
+        "cash basis, contract-specific roll-cost, and fair-value analytics",
+    )
+    physical_gap = "comprehensive physical supply-demand analytics"
+    if analysis_symbol not in {"CL=F", "NG=F"}:
+        physical_gap = "commodity inventory and " + physical_gap
+    return notes.replace(
+        "commodity inventory, physical supply-demand, and term-structure analytics",
+        physical_gap,
+    )
+
+
 def classify_instrument(raw_symbol, override_type=None):
     """Classify *raw_symbol* without market-data or other network access."""
     raw_value = str(raw_symbol)
@@ -264,6 +283,8 @@ def classify_instrument(raw_symbol, override_type=None):
     crypto_spot = primary == "crypto" and asset_class == "crypto" and kind == "spot"
     pipeline_asset_type = "crypto" if crypto_spot or use_crypto_proxy else "stock"
     capability, analysts, notes = _analytics(primary, asset_class, kind)
+    if asset_class == "commodity":
+        notes = _refine_commodity_notes(notes, analysis_symbol)
 
     if option_match:
         notes += " Analysis uses the equity underlying as a proxy for the OCC contract."

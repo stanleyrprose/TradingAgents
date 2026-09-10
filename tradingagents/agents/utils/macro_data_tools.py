@@ -4,6 +4,7 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.cftc_positioning import fetch_cftc_positioning
 from tradingagents.dataflows.eia_inventory import fetch_eia_inventory
+from tradingagents.dataflows.futures_curve import fetch_futures_curve
 from tradingagents.dataflows.interface import route_to_vendor
 from tradingagents.instrument_router import classify_instrument
 
@@ -143,14 +144,16 @@ def get_cross_asset_context(
         sources = [("Driver", series_id) for series_id in series_ids]
         header = (
             f"## Cross-asset commodity context: {symbol}\n"
-            "Official weekly EIA energy inventory may be provided below. Comprehensive "
-            "physical supply-demand and term structure remain unavailable."
+            "Official weekly EIA energy inventory and a Yahoo futures-curve snapshot may "
+            "be provided below. Comprehensive physical supply-demand, cash basis, and "
+            "cost-of-carry fair value remain unavailable."
         )
         fred_context = f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
         return (
             f"{fred_context}\n\n## CFTC positioning\n"
             f"{fetch_cftc_positioning(ticker, curr_date)}\n\n## EIA inventory\n"
-            f"{fetch_eia_inventory(ticker, curr_date)}"
+            f"{fetch_eia_inventory(ticker, curr_date)}\n\n## Futures curve\n"
+            f"{fetch_futures_curve(ticker, curr_date)}"
         )
 
     return (

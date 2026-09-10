@@ -134,7 +134,7 @@ def test_partial_notes_name_missing_domain_analytics(symbol, phrase):
     ("symbol", "required_notes"),
     [
         ("EURUSD", ("forward points", "realized carry")),
-        ("GC=F", ("inventory", "physical supply-demand", "term-structure")),
+        ("GC=F", ("inventory", "physical supply-demand", "cash basis")),
     ],
 )
 def test_cross_asset_profiles_remain_partial_with_explicit_data_gaps(
@@ -146,3 +146,40 @@ def test_cross_asset_profiles_remain_partial_with_explicit_data_gaps(
     assert all(note in profile.notes for note in required_notes)
     if symbol == "EURUSD":
         assert "robust positioning" not in profile.notes
+
+
+def test_supported_metals_curve_notes_reflect_remaining_gaps():
+    profile = classify_instrument("GC=F")
+
+    assert profile.capability == "PARTIAL"
+    assert "inventory" in profile.notes
+    assert "physical supply-demand" in profile.notes
+    assert "term-structure" not in profile.notes
+    assert "futures curve" not in profile.notes
+
+
+@pytest.mark.parametrize("symbol", ["CL=F", "NG=F"])
+def test_supported_energy_curve_notes_reflect_eia_coverage(symbol):
+    notes = classify_instrument(symbol).notes
+
+    assert "inventory" not in notes
+    assert "term-structure" not in notes
+    assert "futures curve" not in notes
+    assert "physical supply-demand" in notes
+    assert "cash basis" in notes
+
+
+def test_unsupported_brent_curve_notes_retain_inventory_and_curve_gaps():
+    notes = classify_instrument("BZ=F").notes
+
+    assert "inventory" in notes
+    assert "term-structure" in notes
+
+
+def test_gold_alias_inherits_curve_coverage_and_retains_derivative_semantics():
+    notes = classify_instrument("XAUUSD").notes
+
+    assert "inventory" in notes
+    assert "term-structure" not in notes
+    assert "futures curve" not in notes
+    assert "derivative contract semantics" in notes
