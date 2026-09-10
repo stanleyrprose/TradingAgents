@@ -10,6 +10,8 @@ from datetime import date, datetime
 
 import requests
 
+from .option_scenarios import build_option_scenario_report
+
 logger = logging.getLogger(__name__)
 
 _URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{underlying}.json"
@@ -161,7 +163,8 @@ def _render_report(
         if contract.right == "C"
         else max(contract.strike - current_price, 0.0)
     )
-    price_proxy = midpoint if midpoint is not None else last
+    positive_last = _row_number(row, "last_trade_price", positive=True)
+    price_proxy = midpoint if midpoint is not None else positive_last
     time_value = max(price_proxy - intrinsic, 0.0) if price_proxy is not None else None
     totals, atm_iv, skew_put, skew_call = _chain_metrics(
         options, contract, current_price
@@ -228,7 +231,35 @@ def _render_report(
         "vendor-calculated; positioning ratios are descriptive, not directional; "
         "stale last trades and wide or zero markets reduce reliability.",
     ]
-    return "\n".join(lines)
+    premium = midpoint if midpoint is not None else positive_last
+    iv = _row_number(row, "iv", positive=True)
+    if premium is not None and iv is not None:
+        scenario = build_option_scenario_report(
+            symbol=contract.symbol,
+            right=contract.right,
+            strike=contract.strike,
+            expiry=contract.expiry,
+            as_of=today,
+            spot=current_price,
+            market_premium=premium,
+            iv_decimal=iv,
+            vendor_theo=_row_number(row, "theo"),
+            vendor_delta=_row_number(row, "delta"),
+            vendor_gamma=_row_number(row, "gamma"),
+            vendor_theta=_row_number(row, "theta"),
+        )
+    else:
+        missing = []
+        if premium is None:
+            missing.append("current premium reference")
+        if iv is None:
+            missing.append("positive IV")
+        scenario = (
+            "<deterministic option scenario unavailable: missing "
+            + " and ".join(missing)
+            + ">"
+        )
+    return "\n".join(lines) + "\n\n" + scenario
 
 
 def fetch_equity_option_context(

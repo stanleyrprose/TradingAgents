@@ -59,9 +59,10 @@ def test_occ_option_notes_reflect_current_context_and_remaining_gaps():
     assert profile.capability == "PARTIAL"
     assert profile.analysts == ("market", "news")
     assert "option Greeks, chain, and IV-surface analytics" not in profile.notes
-    assert "Current Cboe delayed Greeks/IV/liquidity context is available" in profile.notes
+    assert "Current Cboe delayed Greeks/IV/liquidity plus deterministic Black-Scholes scenario analytics are available." in profile.notes
     assert "historical option-chain/IV-surface analytics" in profile.notes
-    assert "model-independent option fair-value/scenario analytics" in profile.notes
+    assert "American/dividend-aware option pricing analytics" in profile.notes
+    assert "model-independent option fair-value/scenario analytics" not in profile.notes
 
 
 def test_legacy_bond_override_maps_to_fixed_income():
@@ -132,7 +133,7 @@ def test_equity_and_crypto_funds_include_social_but_not_fundamentals(symbol):
         ("^TNX", "term-premium"),
         ("^VIX", "skew"),
         ("TLT", "duration"),
-        ("AAPL260918C00200000", "Greeks"),
+        ("AAPL260918C00200000", "historical"),
         ("ES=F", "basis"),
         ("GC=F", "physical supply-demand"),
         ("SPX500", "contract semantics"),

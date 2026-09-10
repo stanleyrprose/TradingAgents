@@ -95,6 +95,10 @@ def _fetch(payload=None):
     with (
         patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
         patch(
+            "tradingagents.dataflows.option_scenarios.resolve_scenario_risk_free_rate",
+            return_value=(0.04, "test rate"),
+        ),
+        patch(
             "tradingagents.dataflows.equity_options.requests.get",
             return_value=_response(payload or _payload()),
         ) as get,
@@ -123,7 +127,7 @@ def test_parse_occ_extracts_fields_and_rejects_invalid_dates_and_format():
 def test_exact_selected_contract_report_and_all_chain_metrics():
     result = _fetch()
 
-    assert result == """Cboe delayed equity option context — AAPL260918C00300000
+    legacy_context = """Cboe delayed equity option context — AAPL260918C00300000
 Contract: AAPL260918C00300000
 Underlying: AAPL
 Expiry: 2026-09-18
@@ -152,6 +156,15 @@ ATM IV proxy: 25.00%
 25-delta put-minus-call IV skew proxy: 12 percentage points (put AAPL260918P00305000, delta -0.26; call AAPL260918C00325000, delta 0.24)
 Cboe IV30: 25.67%
 Cautions: this is a delayed snapshot, not realtime; Greeks and IV are vendor-calculated; positioning ratios are descriptive, not directional; stale last trades and wide or zero markets reduce reliability."""
+    assert result.startswith(legacy_context + "\n\n")
+    assert "# Deterministic option scenario engine" in result
+    assert "## Current premium and expiry breakeven" in result
+    assert "## Theta burn (unchanged spot and IV)" in result
+    assert "## Required underlying to preserve current premium" in result
+    assert "## Spot × IV matrix" in result
+    assert "## Expiry payoff" in result
+    assert "## Delta/gamma local stress" in result
+    assert "not market fair value" in result
 
 
 def test_zero_bid_and_ask_use_last_only_for_time_value():
@@ -164,12 +177,30 @@ def test_zero_bid_and_ask_use_last_only_for_time_value():
     assert "Bid-ask spread as % of midpoint: DATA_UNAVAILABLE" in result
     assert "Intrinsic value: 15" in result
     assert "Time-value proxy: 1.5" in result
+    assert "Current premium: $16.50 per share" in result
+
+
+def test_missing_positive_iv_preserves_context_and_marks_scenario_unavailable():
+    payload = _payload()
+    payload["data"]["options"][0]["iv"] = 0
+
+    result = _fetch(payload)
+
+    assert "Cboe delayed equity option context" in result
+    assert "Bid: 16 | Ask: 18" in result
+    assert "Cautions: this is a delayed snapshot" in result
+    assert result.endswith(
+        "<deterministic option scenario unavailable: missing positive IV>"
+    )
 
 
 def test_date_and_symbol_guards_do_not_make_network_requests():
     with (
         patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
         patch("tradingagents.dataflows.equity_options.requests.get") as get,
+        patch(
+            "tradingagents.dataflows.option_scenarios.resolve_scenario_risk_free_rate"
+        ) as resolve_rate,
     ):
         historical = fetch_equity_option_context(SYMBOL, "2026-09-09")
         future = fetch_equity_option_context(SYMBOL, "2026-09-11")
@@ -179,6 +210,7 @@ def test_date_and_symbol_guards_do_not_make_network_requests():
     assert "historical/future" in future
     assert "invalid OCC option symbol" in invalid
     get.assert_not_called()
+    resolve_rate.assert_not_called()
 
 
 def test_exact_contract_missing_is_unavailable():

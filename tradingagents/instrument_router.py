@@ -311,10 +311,13 @@ def classify_instrument(raw_symbol, override_type=None):
     if is_equity_occ_option:
         notes = notes.replace(
             "option Greeks, chain, and IV-surface analytics",
-            "historical option-chain/IV-surface analytics; model-independent "
-            "option fair-value/scenario analytics",
+            "historical option-chain/IV-surface analytics; American/dividend-aware "
+            "option pricing analytics",
         )
-        notes += " Current Cboe delayed Greeks/IV/liquidity context is available."
+        notes += (
+            " Current Cboe delayed Greeks/IV/liquidity plus deterministic "
+            "Black-Scholes scenario analytics are available."
+        )
     if asset_class == "commodity":
         notes = _refine_commodity_notes(notes, analysis_symbol)
     notes = _refine_general_futures_notes(notes, analysis_symbol)

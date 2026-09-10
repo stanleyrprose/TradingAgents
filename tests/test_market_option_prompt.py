@@ -52,6 +52,14 @@ def test_occ_market_analyst_binds_option_context_and_routes_underlying_tools():
     ) in llm.system_prompt
     assert "underlying BUY or SELL view does not guarantee the option payoff" in llm.system_prompt
     assert f"final conclusion must concern the requested option contract `{ticker}`" in llm.system_prompt
+    assert "expiry breakeven" in llm.system_prompt
+    assert "theta burn" in llm.system_prompt
+    assert "required-underlying-to-preserve-premium" in llm.system_prompt
+    assert "spot×IV matrix" in llm.system_prompt
+    assert "scenario/model estimates" in llm.system_prompt
+    assert "never an executable quote, market fair value, or guaranteed P/L" in llm.system_prompt
+    assert llm.bound_tool_names.count("get_equity_option_context") == 1
+    assert len(llm.bound_tool_names) == 4
 
 
 @pytest.mark.unit
