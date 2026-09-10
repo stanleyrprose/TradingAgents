@@ -2,6 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows.cftc_positioning import fetch_cftc_positioning
 from tradingagents.dataflows.interface import route_to_vendor
 from tradingagents.instrument_router import classify_instrument
 
@@ -124,9 +125,13 @@ def get_cross_asset_context(
             "carry. International series may lag; observation dates matter."
         )
         note_text = "" if not notes else "\n\n" + "\n".join(f"- {note}" for note in notes)
-        return (
+        fred_context = (
             f"{header}{note_text}\n\n"
             f"{_render_series(sources, curr_date, look_back_days)}"
+        )
+        return (
+            f"{fred_context}\n\n## CFTC positioning\n"
+            f"{fetch_cftc_positioning(ticker, curr_date)}"
         )
 
     if profile.asset_class == "commodity":
@@ -140,7 +145,11 @@ def get_cross_asset_context(
             "Inventory, physical supply-demand, and term structure are NOT provided "
             "by this tool."
         )
-        return f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+        fred_context = f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+        return (
+            f"{fred_context}\n\n## CFTC positioning\n"
+            f"{fetch_cftc_positioning(ticker, curr_date)}"
+        )
 
     return (
         f"NOT_APPLICABLE: {profile.canonical_symbol} is not classified as forex "

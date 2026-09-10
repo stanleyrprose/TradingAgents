@@ -13,10 +13,16 @@ def _invoke(ticker: str) -> str:
 
 @pytest.fixture
 def routed():
-    with patch(
-        "tradingagents.agents.utils.macro_data_tools.route_to_vendor",
-        side_effect=lambda _method, series_id, _date, _days: f"REPORT:{series_id}",
-    ) as route:
+    with (
+        patch(
+            "tradingagents.agents.utils.macro_data_tools.route_to_vendor",
+            side_effect=lambda _method, series_id, _date, _days: f"REPORT:{series_id}",
+        ) as route,
+        patch(
+            "tradingagents.agents.utils.macro_data_tools.fetch_cftc_positioning",
+            return_value="MOCK_CFTC_POSITIONING",
+        ),
+    ):
         yield route
 
 
@@ -29,6 +35,8 @@ def test_eurusd_requests_both_rate_proxies_and_dollar_context(routed):
 
     assert _series_requested(routed) == ["ECBMRRFR", "FEDFUNDS", "DTWEXBGS"]
     assert "rate proxies, not exact forward carry" in result
+    assert "REPORT:ECBMRRFR" in result
+    assert "## CFTC positioning\nMOCK_CFTC_POSITIONING" in result
 
 
 def test_usdcad_requests_canadian_proxy_without_duplicate_fedfunds(routed):
@@ -58,6 +66,9 @@ def test_commodity_driver_baskets(ticker, expected, routed):
 
     assert _series_requested(routed) == expected
     assert "term structure are NOT provided" in result
+    assert f"REPORT:{expected[0]}" in result
+    if ticker == "GC=F":
+        assert "## CFTC positioning\nMOCK_CFTC_POSITIONING" in result
 
 
 def test_non_cross_asset_instrument_is_not_applicable(routed):
@@ -79,10 +90,16 @@ def test_one_series_exception_does_not_abort_remaining_series():
             raise RuntimeError("vendor failure")
         return reports[series_id]
 
-    with patch(
-        "tradingagents.agents.utils.macro_data_tools.route_to_vendor",
-        side_effect=route,
-    ) as routed:
+    with (
+        patch(
+            "tradingagents.agents.utils.macro_data_tools.route_to_vendor",
+            side_effect=route,
+        ) as routed,
+        patch(
+            "tradingagents.agents.utils.macro_data_tools.fetch_cftc_positioning",
+            return_value="MOCK_CFTC_POSITIONING",
+        ),
+    ):
         result = _invoke("CL=F")
 
     assert routed.call_args_list == [

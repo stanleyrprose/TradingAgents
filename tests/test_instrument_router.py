@@ -133,7 +133,7 @@ def test_partial_notes_name_missing_domain_analytics(symbol, phrase):
 @pytest.mark.parametrize(
     ("symbol", "required_notes"),
     [
-        ("EURUSD", ("forward points", "realized carry", "robust positioning")),
+        ("EURUSD", ("forward points", "realized carry")),
         ("GC=F", ("inventory", "physical supply-demand", "term-structure")),
     ],
 )
@@ -144,3 +144,5 @@ def test_cross_asset_profiles_remain_partial_with_explicit_data_gaps(
 
     assert profile.capability == "PARTIAL"
     assert all(note in profile.notes for note in required_notes)
+    if symbol == "EURUSD":
+        assert "robust positioning" not in profile.notes
