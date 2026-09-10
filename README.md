@@ -234,6 +234,18 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
+### Optional data credentials
+
+Live macro and social enrichment can use local environment variables (a project `.env` is loaded automatically):
+
+```bash
+FRED_API_KEY=...
+STOCKTWITS_USERNAME=...
+STOCKTWITS_PASSWORD=...
+```
+
+`FRED_API_KEY` enables the existing FRED macro vendor. StockTwits credentials are used only with the official authenticated Firestream Sentiment V2 API; the legacy unauthenticated symbol stream is not used as an automated fallback. Do not commit `.env` or credentials to Git.
+
 ## Persistence and Recovery
 
 TradingAgents persists two kinds of state across runs.
