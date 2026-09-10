@@ -24,6 +24,7 @@ from tradingagents.agents.utils.news_data_tools import (
     get_insider_transactions,
     get_news,
 )
+from tradingagents.agents.utils.options_data_tools import get_equity_option_context
 from tradingagents.agents.utils.prediction_markets_tools import get_prediction_markets
 from tradingagents.agents.utils.technical_indicators_tools import get_indicators
 from tradingagents.instrument_router import classify_instrument
@@ -43,6 +44,7 @@ __all__ = [
     "get_macro_indicators",
     "get_cross_asset_context",
     "get_prediction_markets",
+    "get_equity_option_context",
     "get_verified_market_snapshot",
     "build_instrument_context",
     "resolve_instrument_identity",
@@ -142,6 +144,7 @@ def build_instrument_context(
     ticker: str,
     asset_type: str = "stock",
     identity: Mapping[str, str] | None = None,
+    analysis_symbol: str | None = None,
 ) -> str:
     """Describe the exact instrument so agents preserve identity and ticker.
 
@@ -165,11 +168,20 @@ def build_instrument_context(
     instrument_label = "asset" if is_crypto else "instrument"
     if not is_ordinary_equity and not is_crypto:
         instrument_label = "market instrument"
-    context = (
-        f"The {instrument_label} to analyze is `{ticker}`. "
-        "Use this exact ticker in every tool call, report, and recommendation, "
-        "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `-USD`)."
-    )
+    if analysis_symbol and analysis_symbol != ticker:
+        context = (
+            f"The requested market instrument is the exact requested ticker `{ticker}`. "
+            f"The market-data analysis proxy/underlying is `{analysis_symbol}`. "
+            f"Use the requested ticker `{ticker}` for contract-specific tools and final "
+            f"recommendations. Use `{analysis_symbol}` only for underlying OHLCV, "
+            "technical, and news tools. Do not conflate the contract and underlying."
+        )
+    else:
+        context = (
+            f"The {instrument_label} to analyze is `{ticker}`. "
+            "Use this exact ticker in every tool call, report, and recommendation, "
+            "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `-USD`)."
+        )
 
     details = []
     if identity:
@@ -227,6 +239,7 @@ def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
     return build_instrument_context(
         str(state["company_of_interest"]),
         state.get("asset_type", "stock"),
+        analysis_symbol=state.get("analysis_symbol"),
     )
 
 
@@ -255,5 +268,3 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
-

@@ -53,6 +53,17 @@ def test_occ_option_extracts_underlying_analysis_symbol():
     assert "proxy" in profile.notes
 
 
+def test_occ_option_notes_reflect_current_context_and_remaining_gaps():
+    profile = classify_instrument("AAPL260918C00200000")
+
+    assert profile.capability == "PARTIAL"
+    assert profile.analysts == ("market", "news")
+    assert "option Greeks, chain, and IV-surface analytics" not in profile.notes
+    assert "Current Cboe delayed Greeks/IV/liquidity context is available" in profile.notes
+    assert "historical option-chain/IV-surface analytics" in profile.notes
+    assert "model-independent option fair-value/scenario analytics" in profile.notes
+
+
 def test_legacy_bond_override_maps_to_fixed_income():
     profile = classify_instrument("AAPL", "bond")
     assert (profile.primary_type, profile.asset_class, profile.instrument_kind) == (
@@ -88,6 +99,7 @@ def test_option_override_keeps_crypto_exposure_and_uses_crypto_proxy():
     )
     assert profile.pipeline_asset_type == "crypto"
     assert "crypto underlying" in profile.notes
+    assert "option Greeks, chain, and IV-surface analytics" in profile.notes
 
 
 def test_invalid_override_is_rejected():

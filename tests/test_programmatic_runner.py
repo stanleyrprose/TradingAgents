@@ -27,7 +27,7 @@ def test_non_runnable_symbol_exits_before_graph_construction(capsys):
     assert "requires vendor price bars" in capsys.readouterr().out
 
 
-def test_runner_uses_occ_underlying_for_propagate_and_reports():
+def test_runner_preserves_occ_identity_and_passes_underlying_as_analysis_proxy():
     graph = MagicMock()
     graph.propagate.return_value = ({"state": "complete"}, "HOLD")
     graph.save_reports.return_value = "/tmp/report"
@@ -37,9 +37,17 @@ def test_runner_uses_occ_underlying_for_propagate_and_reports():
         assert _load_runner()["main"]() == 0
 
     graph.propagate.assert_called_once()
-    assert graph.propagate.call_args.args[:2] == ("AAPL", graph.propagate.call_args.args[1])
-    assert graph.propagate.call_args.kwargs == {"asset_type": "stock"}
-    graph.save_reports.assert_called_once_with({"state": "complete"}, "AAPL")
+    assert graph.propagate.call_args.args[:2] == (
+        "AAPL260918C00200000",
+        graph.propagate.call_args.args[1],
+    )
+    assert graph.propagate.call_args.kwargs == {
+        "asset_type": "stock",
+        "analysis_symbol": "AAPL",
+    }
+    graph.save_reports.assert_called_once_with(
+        {"state": "complete"}, "AAPL260918C00200000"
+    )
 
 
 def test_runner_accepts_legacy_bond_type(capsys):

@@ -1,18 +1,29 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
+    get_equity_option_context,
     get_indicators,
     get_instrument_context_from_state,
     get_language_instruction,
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.instrument_router import classify_instrument
 
 
 def create_market_analyst(llm):
 
     def market_analyst_node(state):
         current_date = state["trade_date"]
+        requested_ticker = state["company_of_interest"]
+        analysis_ticker = state.get("analysis_symbol") or requested_ticker
+        profile = classify_instrument(requested_ticker)
+        is_equity_occ_option = (
+            profile.primary_type == "option"
+            and profile.asset_class == "equity"
+            and profile.instrument_kind == "option"
+            and analysis_ticker != requested_ticker
+        )
         instrument_context = get_instrument_context_from_state(state)
 
         tools = [
@@ -20,9 +31,33 @@ def create_market_analyst(llm):
             get_indicators,
             get_verified_market_snapshot,
         ]
+        if is_equity_occ_option:
+            tools.append(get_equity_option_context)
+
+        market_ticker_reference = (
+            f"the underlying analysis ticker `{analysis_ticker}`"
+            if is_equity_occ_option
+            else "this ticker"
+        )
+        option_instruction = ""
+        if is_equity_occ_option:
+            option_instruction = (
+                " This is an equity option analysis. Before finalizing, you must call "
+                "get_equity_option_context(ticker, curr_date) with the exact requested "
+                f"OCC ticker `{requested_ticker}` and current date `{current_date}`. "
+                "For get_stock_data, get_indicators, and "
+                "get_verified_market_snapshot, you must use the exact underlying "
+                f"analysis ticker `{analysis_ticker}`, not the requested OCC ticker. "
+                "Combine the underlying technical state with the requested contract's "
+                "implied volatility, Greeks, and liquidity. Clearly identify the "
+                "contract data as a delayed Cboe snapshot. An underlying BUY or SELL "
+                "view does not guarantee the option payoff, so do not equate the two; "
+                f"the final conclusion must concern the requested option contract "
+                f"`{requested_ticker}`."
+            )
 
         system_message = (
-            """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
+            f"""You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
 - close_50_sma: 50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.
@@ -48,9 +83,10 @@ Volume-Based Indicators:
 
 - Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Please make sure to call get_stock_data first to retrieve the CSV that is needed to generate indicators. Then use get_indicators with the specific indicator names.
 
-Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
+Before writing the final report, call get_verified_market_snapshot for {market_ticker_reference} and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+            + option_instruction
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )

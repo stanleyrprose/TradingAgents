@@ -302,6 +302,19 @@ def classify_instrument(raw_symbol, override_type=None):
     crypto_spot = primary == "crypto" and asset_class == "crypto" and kind == "spot"
     pipeline_asset_type = "crypto" if crypto_spot or use_crypto_proxy else "stock"
     capability, analysts, notes = _analytics(primary, asset_class, kind)
+    is_equity_occ_option = (
+        option_match is not None
+        and primary == "option"
+        and asset_class == "equity"
+        and kind == "option"
+    )
+    if is_equity_occ_option:
+        notes = notes.replace(
+            "option Greeks, chain, and IV-surface analytics",
+            "historical option-chain/IV-surface analytics; model-independent "
+            "option fair-value/scenario analytics",
+        )
+        notes += " Current Cboe delayed Greeks/IV/liquidity context is available."
     if asset_class == "commodity":
         notes = _refine_commodity_notes(notes, analysis_symbol)
     notes = _refine_general_futures_notes(notes, analysis_symbol)

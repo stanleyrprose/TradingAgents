@@ -17,6 +17,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_balance_sheet,
     get_cashflow,
     get_cross_asset_context,
+    get_equity_option_context,
     get_fundamentals,
     get_global_news,
     get_income_statement,
@@ -268,6 +269,8 @@ class TradingAgentsGraph:
                     # LLM and required by its prompt; must be executable here or
                     # the call fails and the model reports it "unavailable").
                     get_verified_market_snapshot,
+                    # Current delayed contract context for exact OCC equity options.
+                    get_equity_option_context,
                 ]
             ),
             "social": ToolNode(
@@ -413,7 +416,12 @@ class TradingAgentsGraph:
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
-    def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
+    def resolve_instrument_context(
+        self,
+        ticker: str,
+        asset_type: str = "stock",
+        analysis_symbol: str | None = None,
+    ) -> str:
         """Resolve ticker identity once and return the full instrument context.
 
         Deterministic yfinance lookup (cached, fail-open) injected into a
@@ -422,8 +430,13 @@ class TradingAgentsGraph:
         path and the CLI call this so the resolved identity reaches the whole
         graph regardless of entry point.
         """
-        identity = resolve_instrument_identity(ticker)
-        return build_instrument_context(ticker, asset_type, identity)
+        identity = resolve_instrument_identity(analysis_symbol or ticker)
+        return build_instrument_context(
+            ticker,
+            asset_type,
+            identity,
+            analysis_symbol=analysis_symbol,
+        )
 
     def _memory_as_of(self, trade_date) -> str | None:
         """Point-in-time cutoff for past-context lessons (#1251).
@@ -450,7 +463,13 @@ class TradingAgentsGraph:
             f"asset={asset_type}",
         ])
 
-    def propagate(self, company_name, trade_date, asset_type: str = "stock"):
+    def propagate(
+        self,
+        company_name,
+        trade_date,
+        asset_type: str = "stock",
+        analysis_symbol: str | None = None,
+    ):
         """Run the trading agents graph for a company on a specific date.
 
         ``asset_type`` selects between the stock pipeline (default) and the
@@ -467,6 +486,7 @@ class TradingAgentsGraph:
         PortfolioRating enum.
         """
         self.ticker = company_name
+        resolved_analysis_symbol = analysis_symbol or company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
@@ -474,6 +494,7 @@ class TradingAgentsGraph:
         with self.checkpoint_scope(company_name, trade_date, asset_type) as thread_id_value:
             return self._run_graph(
                 company_name, trade_date, asset_type=asset_type,
+                analysis_symbol=resolved_analysis_symbol,
                 checkpoint_thread_id=thread_id_value,
             )
 
@@ -555,8 +576,14 @@ class TradingAgentsGraph:
             )
         return write_report_tree(final_state, ticker, save_path)
 
-    def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
-                   checkpoint_thread_id: str | None = None):
+    def _run_graph(
+        self,
+        company_name,
+        trade_date,
+        asset_type: str = "stock",
+        checkpoint_thread_id: str | None = None,
+        analysis_symbol: str | None = None,
+    ):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents. On a
@@ -565,13 +592,19 @@ class TradingAgentsGraph:
         past_context = self.memory_log.get_past_context(
             company_name, as_of=self._memory_as_of(trade_date)
         )
-        instrument_context = self.resolve_instrument_context(company_name, asset_type)
+        resolved_analysis_symbol = analysis_symbol or company_name
+        instrument_context = self.resolve_instrument_context(
+            company_name,
+            asset_type,
+            analysis_symbol=resolved_analysis_symbol,
+        )
         init_agent_state = self.propagator.create_initial_state(
             company_name,
             trade_date,
             asset_type=asset_type,
             past_context=past_context,
             instrument_context=instrument_context,
+            analysis_symbol=resolved_analysis_symbol,
         )
         args = self.propagator.get_graph_args()
 

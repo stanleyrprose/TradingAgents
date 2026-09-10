@@ -42,16 +42,17 @@ class _CapturingToolLLM:
         return RunnableLambda(invoke)
 
 
-def _invoke_news_analyst(ticker):
+def _invoke_news_analyst(ticker, analysis_symbol=None):
     llm = _CapturingToolLLM()
-    na.create_news_analyst(llm)(
-        {
-            "trade_date": "2026-09-10",
-            "company_of_interest": ticker,
-            "asset_type": "stock",
-            "messages": [],
-        }
-    )
+    state = {
+        "trade_date": "2026-09-10",
+        "company_of_interest": ticker,
+        "asset_type": "stock",
+        "messages": [],
+    }
+    if analysis_symbol is not None:
+        state["analysis_symbol"] = analysis_symbol
+    na.create_news_analyst(llm)(state)
     return llm
 
 
@@ -85,3 +86,14 @@ def test_equity_news_analyst_does_not_bind_cross_asset_context():
     assert "get_cross_asset_context" not in llm.bound_tool_names
     assert "get_cross_asset_context(ticker, current_date, 180)" not in llm.system_prompt
     assert "company-specific news" in llm.system_prompt
+
+
+@pytest.mark.unit
+def test_occ_news_uses_underlying_but_reports_on_requested_contract():
+    ticker = "AAPL260918C00200000"
+    llm = _invoke_news_analyst(ticker, analysis_symbol="AAPL")
+
+    assert "get_cross_asset_context" not in llm.bound_tool_names
+    assert "For get_news" in llm.system_prompt
+    assert "exact underlying analysis ticker `AAPL`" in llm.system_prompt
+    assert f"final report and recommendation must concern the exact requested ticker `{ticker}`" in llm.system_prompt

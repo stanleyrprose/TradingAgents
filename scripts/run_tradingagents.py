@@ -75,12 +75,13 @@ def main():
             config[key] = value
     graph = TradingAgentsGraph(selected_analysts=list(profile.analysts), config=config, debug=False)
     final_state, decision = graph.propagate(
-        profile.analysis_symbol,
+        profile.canonical_symbol,
         args.date,
         asset_type=profile.pipeline_asset_type,
+        analysis_symbol=profile.analysis_symbol,
     )
     print(f"decision: {decision}")
-    print(f"reports: {graph.save_reports(final_state, profile.analysis_symbol)}")
+    print(f"reports: {graph.save_reports(final_state, profile.canonical_symbol)}")
     return 0
 
 

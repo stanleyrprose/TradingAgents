@@ -15,8 +15,9 @@ from tradingagents.instrument_router import classify_instrument
 def create_news_analyst(llm):
     def news_analyst_node(state):
         current_date = state["trade_date"]
-        ticker = state["company_of_interest"]
-        profile = classify_instrument(ticker)
+        requested_ticker = state["company_of_interest"]
+        analysis_ticker = state.get("analysis_symbol") or requested_ticker
+        profile = classify_instrument(requested_ticker)
         is_ordinary_equity = (
             profile.primary_type == "stock"
             and profile.asset_class == "equity"
@@ -49,12 +50,22 @@ def create_news_analyst(llm):
             cross_asset_instruction = (
                 " Before finalizing macro analysis, you must call "
                 "get_cross_asset_context(ticker, current_date, 180), using the "
-                f"exact ticker `{ticker}` and current date `{current_date}`."
+                f"exact ticker `{requested_ticker}` and current date `{current_date}`."
+            )
+
+        proxy_news_instruction = ""
+        if analysis_ticker != requested_ticker:
+            proxy_news_instruction = (
+                f" For get_news, you must use the exact underlying analysis ticker "
+                f"`{analysis_ticker}`, not the requested ticker `{requested_ticker}`. "
+                "The final report and recommendation must concern the exact requested "
+                f"ticker `{requested_ticker}`."
             )
 
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(ticker, start_date, end_date) for {asset_label}-specific news by ticker symbol, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + cross_asset_instruction
+            + proxy_news_instruction
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )

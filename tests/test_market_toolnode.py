@@ -20,7 +20,11 @@ def test_market_toolnode_can_execute_verified_snapshot():
         "registered in the market ToolNode, so the model's call fails."
     )
     # the other core market tools must remain too
-    assert {"get_stock_data", "get_indicators"} <= market_tools
+    assert {
+        "get_stock_data",
+        "get_indicators",
+        "get_equity_option_context",
+    } <= market_tools
 
 
 @pytest.mark.unit
