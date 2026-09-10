@@ -233,6 +233,25 @@ def _refine_commodity_notes(notes: str, analysis_symbol: str) -> str:
     )
 
 
+def _refine_general_futures_notes(notes: str, analysis_symbol: str) -> str:
+    """Reflect curve coverage while retaining contract-family analytics gaps."""
+    supported = _INDEX_FUTURES | _FIXED_INCOME_FUTURES | _FOREX_FUTURES
+    if analysis_symbol not in supported:
+        return notes
+
+    notes = notes.replace(
+        "futures curve, basis, and roll analytics",
+        "cash basis, contract-specific roll-cost, and fair-value analytics",
+    )
+    if analysis_symbol in _FIXED_INCOME_FUTURES:
+        notes = notes.replace(
+            "fixed-income duration and spread analytics",
+            "fixed-income duration and spread analytics; delivery-basket and "
+            "cheapest-to-deliver (CTD) analytics",
+        )
+    return notes
+
+
 def classify_instrument(raw_symbol, override_type=None):
     """Classify *raw_symbol* without market-data or other network access."""
     raw_value = str(raw_symbol)
@@ -285,6 +304,7 @@ def classify_instrument(raw_symbol, override_type=None):
     capability, analysts, notes = _analytics(primary, asset_class, kind)
     if asset_class == "commodity":
         notes = _refine_commodity_notes(notes, analysis_symbol)
+    notes = _refine_general_futures_notes(notes, analysis_symbol)
 
     if option_match:
         notes += " Analysis uses the equity underlying as a proxy for the OCC contract."

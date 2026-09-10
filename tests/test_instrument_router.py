@@ -183,3 +183,39 @@ def test_gold_alias_inherits_curve_coverage_and_retains_derivative_semantics():
     assert "term-structure" not in notes
     assert "futures curve" not in notes
     assert "derivative contract semantics" in notes
+
+
+@pytest.mark.parametrize(
+    ("symbol", "family_gaps"),
+    [
+        ("ES=F", ("index breadth", "constituent internals")),
+        (
+            "ZN=F",
+            (
+                "fixed-income duration",
+                "spread analytics",
+                "delivery-basket",
+                "cheapest-to-deliver (CTD)",
+            ),
+        ),
+        ("6E=F", ("forex forward points", "realized carry")),
+    ],
+)
+def test_supported_general_futures_notes_reflect_remaining_gaps(
+    symbol, family_gaps
+):
+    profile = classify_instrument(symbol)
+
+    assert profile.capability == "PARTIAL"
+    assert "futures curve" not in profile.notes
+    assert "cash basis" in profile.notes
+    assert "contract-specific roll-cost" in profile.notes
+    assert "fair-value analytics" in profile.notes
+    assert all(gap in profile.notes for gap in family_gaps)
+
+
+def test_unsupported_future_retains_generic_curve_gap():
+    profile = classify_instrument("VX=F")
+
+    assert profile.capability == "PARTIAL"
+    assert "futures curve, basis, and roll analytics" in profile.notes

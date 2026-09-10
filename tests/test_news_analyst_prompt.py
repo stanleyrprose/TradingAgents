@@ -58,7 +58,13 @@ def _invoke_news_analyst(ticker):
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("ticker", "profile_wording"),
-    [("EURUSD", "asset_class=forex"), ("GC=F", "asset_class=commodity")],
+    [
+        ("EURUSD", "asset_class=forex"),
+        ("GC=F", "asset_class=commodity"),
+        ("6E=F", "asset_class=forex"),
+        ("ES=F", "asset_class=index"),
+        ("ZN=F", "asset_class=fixed_income"),
+    ],
 )
 def test_cross_asset_news_analyst_binds_tool_and_renders_instruction(
     ticker, profile_wording

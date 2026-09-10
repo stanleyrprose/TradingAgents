@@ -98,6 +98,26 @@ def test_usdjpy_inverts_jpy_leg():
     assert "differential proxy: -30.00 percentage points" in result
 
 
+@pytest.mark.parametrize(
+    ("symbol", "code", "currency", "leveraged_long", "expected_pct"),
+    [
+        ("6E=F", "099741", "EUR", 250, "+25.00"),
+        ("6J=F", "097741", "JPY", 300, "+30.00"),
+    ],
+)
+def test_currency_futures_use_direct_one_leg_proxy_without_inversion(
+    symbol, code, currency, leveraged_long, expected_pct
+):
+    rows = (_tff_row(code, Lev_Money_Positions_Long_All=leveraged_long),)
+    with patch.object(cftc, "_load_annual_archive", return_value=rows) as load:
+        result = cftc.fetch_cftc_positioning(symbol, "2026-09-11")
+
+    load.assert_called_once_with("tff", 2026, 12.0)
+    assert f"{currency} currency futures vs USD ({code})" in result
+    assert f"Contract leveraged-money positioning proxy: {expected_pct}" in result
+    assert "This is the currency futures leg versus USD, not OTC spot positioning." in result
+
+
 def test_eurjpy_is_eur_pct_minus_jpy_pct():
     rows = (
         _tff_row("099741", Lev_Money_Positions_Long_All=300),

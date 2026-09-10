@@ -21,6 +21,27 @@ _FOREX_RATE_PROXIES = {
     "CNH": "IRSTCI01CNM156N",
 }
 
+_FX_FUTURES_CURRENCIES = {
+    "6E=F": "EUR",
+    "6J=F": "JPY",
+    "6B=F": "GBP",
+    "6A=F": "AUD",
+    "6C=F": "CAD",
+    "6S=F": "CHF",
+}
+_INDEX_FUTURES_DRIVERS = {
+    "ES=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+    "NQ=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+    "YM=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+    "RTY=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+}
+_TREASURY_FUTURES_DRIVERS = {
+    "ZB=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+    "ZN=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+    "ZF=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+    "ZT=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+}
+
 _COMMODITY_DRIVER_BASKETS = {
     "CL=F": ("DCOILWTICO", "DTWEXBGS", "DGS10", "INDPRO"),
     "BZ=F": ("DCOILBRENTEU", "DTWEXBGS", "DGS10", "INDPRO"),
@@ -89,8 +110,39 @@ def get_macro_indicators(
 def get_cross_asset_context(
     ticker: str, curr_date: str, look_back_days: int | None = 180
 ) -> str:
-    """Return rate-proxy context for forex or macro drivers for commodities."""
+    """Return macro context for supported cross-asset instruments."""
     profile = classify_instrument(ticker)
+
+    if profile.asset_class == "forex" and profile.instrument_kind == "future":
+        symbol = profile.canonical_symbol
+        currency = _FX_FUTURES_CURRENCIES.get(symbol)
+        if currency is not None:
+            series_ids = (_FOREX_RATE_PROXIES[currency], "FEDFUNDS", "DTWEXBGS")
+            sources = []
+            seen_series = set()
+            for label, series_id in (
+                (f"{currency} rate proxy", series_ids[0]),
+                ("US policy-rate proxy", series_ids[1]),
+                ("Trade-weighted US dollar", series_ids[2]),
+            ):
+                if series_id not in seen_series:
+                    seen_series.add(series_id)
+                    sources.append((label, series_id))
+
+            header = (
+                f"## Cross-asset FX futures context: {symbol}\n"
+                "These policy/money-market rates are macro proxies, not exact OTC "
+                "forward points or realized carry. International series may lag; "
+                "observation dates matter."
+            )
+            fred_context = (
+                f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+            )
+            return (
+                f"{fred_context}\n\n## CFTC positioning\n"
+                f"{fetch_cftc_positioning(ticker, curr_date)}\n\n## Futures curve\n"
+                f"{fetch_futures_curve(ticker, curr_date)}"
+            )
 
     if profile.asset_class == "forex":
         pair = profile.canonical_symbol.removesuffix("=X")
@@ -136,6 +188,42 @@ def get_cross_asset_context(
             f"{fetch_cftc_positioning(ticker, curr_date)}"
         )
 
+    if profile.instrument_kind == "future" and profile.asset_class == "index":
+        symbol = profile.analysis_symbol
+        series_ids = _INDEX_FUTURES_DRIVERS.get(symbol)
+        if series_ids is not None:
+            sources = [("Macro driver", series_id) for series_id in series_ids]
+            header = f"## Cross-asset index futures context: {symbol}"
+            fred_context = (
+                f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+            )
+            return (
+                f"{fred_context}\n\n## Futures curve\n"
+                f"{fetch_futures_curve(ticker, curr_date)}"
+            )
+
+    if (
+        profile.instrument_kind == "future"
+        and profile.asset_class == "fixed_income"
+    ):
+        symbol = profile.analysis_symbol
+        series_ids = _TREASURY_FUTURES_DRIVERS.get(symbol)
+        if series_ids is not None:
+            sources = [("Rate context", series_id) for series_id in series_ids]
+            header = (
+                f"## Cross-asset U.S. Treasury futures context: {symbol}\n"
+                "These series provide macro/rate context; they do not solve "
+                "cheapest-to-deliver (CTD), delivery-basket, cash-bond basis, or "
+                "fair-value analytics."
+            )
+            fred_context = (
+                f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+            )
+            return (
+                f"{fred_context}\n\n## Futures curve\n"
+                f"{fetch_futures_curve(ticker, curr_date)}"
+            )
+
     if profile.asset_class == "commodity":
         symbol = profile.analysis_symbol
         series_ids = _COMMODITY_DRIVER_BASKETS.get(
@@ -157,6 +245,6 @@ def get_cross_asset_context(
         )
 
     return (
-        f"NOT_APPLICABLE: {profile.canonical_symbol} is not classified as forex "
-        "or commodity."
+        f"NOT_APPLICABLE: {profile.canonical_symbol} is not a supported cross-asset "
+        "instrument."
     )

@@ -32,6 +32,15 @@ _FOREX_CODES = {
     "NZD": "112741",
 }
 
+_FOREX_FUTURES = {
+    "6E=F": "EUR",
+    "6J=F": "JPY",
+    "6B=F": "GBP",
+    "6A=F": "AUD",
+    "6C=F": "CAD",
+    "6S=F": "CHF",
+}
+
 _COMMODITY_CODES = {
     "GC=F": "088691",
     "SI=F": "084691",
@@ -178,10 +187,14 @@ def _release_lag(cutoff: date) -> str:
 def _forex_report(
     canonical_symbol: str, end: date, timeout: float
 ) -> str:
-    pair = canonical_symbol.removesuffix("=X")
-    if len(pair) != 6:
-        return _unavailable(f"unsupported forex symbol {canonical_symbol}")
-    base, quote = pair[:3], pair[3:]
+    futures_currency = _FOREX_FUTURES.get(canonical_symbol)
+    if futures_currency is not None:
+        base, quote = futures_currency, "USD"
+    else:
+        pair = canonical_symbol.removesuffix("=X")
+        if len(pair) != 6:
+            return _unavailable(f"unsupported forex symbol {canonical_symbol}")
+        base, quote = pair[:3], pair[3:]
     unsupported = [
         currency
         for currency in (base, quote)
@@ -248,24 +261,29 @@ def _forex_report(
             ]
         )
 
-    if quote == "USD":
+    if futures_currency is not None:
+        proxy = results[futures_currency]
+    elif quote == "USD":
         proxy = results[base]
     elif base == "USD":
         proxy = -results[quote]
     else:
         proxy = results[base] - results[quote]
-    lines.extend(
-        [
-            (
-                "Pair leveraged-money positioning differential proxy: "
-                f"{proxy:+.2f} percentage points of OI"
-            ),
-            (
-                "This is a differential proxy from currency futures versus USD, "
-                "not direct OTC spot positioning or a direct cross-pair COT measure."
-            ),
-        ]
+    proxy_label = (
+        "Contract leveraged-money positioning proxy"
+        if futures_currency is not None
+        else "Pair leveraged-money positioning differential proxy"
     )
+    lines.append(f"{proxy_label}: {proxy:+.2f} percentage points of OI")
+    if futures_currency is not None:
+        lines.append(
+            "This is the currency futures leg versus USD, not OTC spot positioning."
+        )
+    else:
+        lines.append(
+            "This is a differential proxy from currency futures versus USD, "
+            "not direct OTC spot positioning or a direct cross-pair COT measure."
+        )
     return "\n".join(lines)
 
 

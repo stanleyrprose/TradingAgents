@@ -37,7 +37,10 @@ def create_news_analyst(llm):
             get_macro_indicators,
             get_prediction_markets,
         ]
-        cross_asset_required = profile.asset_class in {"forex", "commodity"}
+        cross_asset_required = profile.asset_class in {"forex", "commodity"} or (
+            profile.instrument_kind == "future"
+            and profile.asset_class in {"index", "fixed_income"}
+        )
         if cross_asset_required:
             tools.append(get_cross_asset_context)
 

@@ -54,6 +54,18 @@ def test_cl_september_listed_contracts_use_exact_month_codes():
     ]
 
 
+@pytest.mark.parametrize(
+    ("root", "expected"),
+    [
+        ("ES=F", ["ESU26.CME", "ESZ26.CME", "ESH27.CME"]),
+        ("ZN=F", ["ZNU26.CBT", "ZNZ26.CBT", "ZNH27.CBT"]),
+        ("6E=F", ["6EU26.CME", "6EZ26.CME", "6EH27.CME"]),
+    ],
+)
+def test_quarterly_contract_generation_around_september_2026(root, expected):
+    assert _symbols(_listed_contracts(root, END_DATE))[:3] == expected
+
+
 def test_gc_rollover_anchors_on_high_volume_december_then_february_and_april():
     observations = {
         "GCV26.CMX": _observation("GCV26.CMX", (2026, 10), 100, 10),
@@ -148,6 +160,125 @@ def test_xauusd_warns_that_gc_f_is_used_as_a_proxy():
     assert result.startswith("Commodity futures curve — GC=F")
 
 
+@pytest.mark.parametrize(
+    ("root", "header", "caution"),
+    [
+        (
+            "ES=F",
+            "Index futures curve — ES=F",
+            "not spot-index fair-value basis; dividends and financing matter",
+        ),
+        (
+            "ZN=F",
+            "U.S. Treasury futures curve — ZN=F",
+            "delivery basket, cheapest-to-deliver, and delivery option matter",
+        ),
+        (
+            "6E=F",
+            "FX futures curve — 6E=F",
+            "not exact OTC forward points or realized carry",
+        ),
+    ],
+)
+def test_general_futures_render_family_header_and_cautions(root, header, caution):
+    contracts = _listed_contracts(root, END_DATE)[:3]
+    observations = {
+        contract.symbol: _Observation(
+            contract=contract,
+            close=100 + offset,
+            last_bar=END_DATE,
+            volume_5bar=1_000 - offset * 100,
+        )
+        for offset, contract in enumerate(contracts)
+    }
+
+    with patch(
+        "tradingagents.dataflows.futures_curve._contract_observation",
+        side_effect=lambda contract, _end: observations.get(contract.symbol),
+    ):
+        result = fetch_futures_curve(root, "2026-09-10")
+
+    assert result.startswith(header)
+    assert caution in result
+    assert "guaranteed roll return" in result
+    assert "NOT cash basis" in result
+
+
+def test_treasury_two_valid_contracts_render_limited_curve_without_next2_fields():
+    observations = {
+        "ZNU26.CBT": _observation("ZNU26.CBT", (2026, 9), 110, 1_000),
+        "ZNZ26.CBT": _observation("ZNZ26.CBT", (2026, 12), 111, 500),
+    }
+
+    with patch(
+        "tradingagents.dataflows.futures_curve._contract_observation",
+        side_effect=lambda contract, _end: observations.get(contract.symbol),
+    ):
+        result = fetch_futures_curve("ZN=F", "2026-09-10")
+
+    assert result.startswith("U.S. Treasury futures curve — ZN=F")
+    assert "LIMITED CURVE DEPTH" in result
+    assert "ZNU26.CBT" in result
+    assert "ZNZ26.CBT" in result
+    assert "Next vs front spread: +0.91%" in result
+    assert "Front-to-next curve classification: Contango" in result
+    assert "Annualized slope proxy (next vs front):" in result
+    assert "Next2" not in result
+
+
+def test_treasury_three_valid_contracts_with_middle_anchor_render_limited_curve():
+    observations = {
+        "ZNU26.CBT": _observation("ZNU26.CBT", (2026, 9), 110, 500),
+        "ZNZ26.CBT": _observation("ZNZ26.CBT", (2026, 12), 111, 1_000),
+        "ZNH27.CBT": _observation("ZNH27.CBT", (2027, 3), 112, 400),
+    }
+
+    with patch(
+        "tradingagents.dataflows.futures_curve._contract_observation",
+        side_effect=lambda contract, _end: observations.get(contract.symbol),
+    ):
+        result = fetch_futures_curve("ZN=F", "2026-09-10")
+
+    assert result.startswith("U.S. Treasury futures curve — ZN=F")
+    assert "LIMITED CURVE DEPTH" in result
+    assert "only one later fresh contract after the active anchor" in result
+    assert "ZNU26.CBT" not in result
+    assert result.index("ZNZ26.CBT") < result.index("ZNH27.CBT")
+    assert "Next2" not in result
+
+
+def test_treasury_one_valid_contract_degrades_gracefully():
+    observations = {
+        "ZNU26.CBT": _observation("ZNU26.CBT", (2026, 9), 110, 1_000),
+    }
+
+    with patch(
+        "tradingagents.dataflows.futures_curve._contract_observation",
+        side_effect=lambda contract, _end: observations.get(contract.symbol),
+    ):
+        result = fetch_futures_curve("ZN=F", "2026-09-10")
+
+    assert result.startswith("<futures curve unavailable:")
+    assert "fewer than two fresh, positive-price contracts" in result
+
+
+def test_treasury_does_not_replace_high_volume_anchor_with_earlier_contract():
+    observations = {
+        "ZNU26.CBT": _observation("ZNU26.CBT", (2026, 9), 110, 500),
+        "ZNZ26.CBT": _observation("ZNZ26.CBT", (2026, 12), 111, 750),
+        "ZNH27.CBT": _observation("ZNH27.CBT", (2027, 3), 112, 1_000),
+    }
+
+    with patch(
+        "tradingagents.dataflows.futures_curve._contract_observation",
+        side_effect=lambda contract, _end: observations.get(contract.symbol),
+    ):
+        result = fetch_futures_curve("ZN=F", "2026-09-10")
+
+    assert result.startswith("<futures curve unavailable:")
+    assert "after the active ZN=F anchor" in result
+
+
 def test_brent_is_explicitly_unsupported_without_observing_contracts():
     with patch("tradingagents.dataflows.futures_curve._contract_observation") as observe:
         result = fetch_futures_curve("BZ=F", "2026-09-10")
@@ -184,9 +315,7 @@ def test_history_request_uses_exclusive_next_day_without_requesting_future_bars(
 
     assert result is history
     factory.assert_called_once_with("GCV26.CMX")
-    ticker.history.assert_called_once_with(
-        start="2026-08-31", end="2026-09-11", auto_adjust=False
-    )
+    ticker.history.assert_called_once_with(start="2026-08-31", end="2026-09-11", auto_adjust=False)
     _fetch_contract_history.cache_clear()
 
 
