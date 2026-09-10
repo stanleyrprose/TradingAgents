@@ -2,7 +2,7 @@ import importlib.util
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -220,3 +220,241 @@ def test_review_returns_two_for_automation_fail_closed(capsys):
         ) == 2
 
     assert capsys.readouterr().out == "POSITION REVIEW\n"
+
+
+def _refresh_result(status, *, option_direction="bullish", current_direction=None):
+    return SimpleNamespace(
+        status=status,
+        option_direction=option_direction,
+        current_direction=current_direction,
+        portfolio_rating="Hold" if current_direction is None else ("Buy" if current_direction == "bullish" else "Sell"),
+        trader_action="Hold" if current_direction is None else ("Buy" if current_direction == "bullish" else "Sell"),
+        reason=f"refresh {status}",
+    )
+
+
+def test_refresh_only_invalidated_is_informational_not_forced_exit(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("INVALIDATED", current_direction="bearish")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ) as refresh_call,
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--date",
+                "2026-09-10",
+                "--refresh-thesis",
+            ]
+        )
+
+    assert rc == 0
+    refresh_call.assert_called_once_with(snapshot, "2026-09-10")
+    output = capsys.readouterr().out
+    assert "Status: **INVALIDATED**" in output
+    assert "informational only" in output
+    assert "FINAL LIFECYCLE STATUS: EXIT" not in output
+
+
+def test_exit_on_invalidation_implies_refresh_and_overrides_hold(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("INVALIDATED", current_direction="bearish")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ) as refresh_call,
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--date",
+                "2026-09-10",
+                "--exit-on-thesis-invalidation",
+            ]
+        )
+
+    assert rc == 0
+    refresh_call.assert_called_once_with(snapshot, "2026-09-10")
+    output = capsys.readouterr().out
+    assert "Policy: EXIT on explicit opposite consensus" in output
+    assert "FINAL LIFECYCLE STATUS: EXIT" in output
+
+
+def test_exit_on_invalidation_neutral_does_not_force_exit(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("NEUTRAL", current_direction=None)
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ),
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--exit-on-thesis-invalidation",
+            ]
+        )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Status: **NEUTRAL**" in output
+    assert "FINAL LIFECYCLE STATUS: EXIT" not in output
+
+
+def test_explicit_refresh_failure_is_fail_closed(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            side_effect=RuntimeError("graph failed"),
+        ),
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--refresh-thesis",
+            ]
+        )
+
+    assert rc == 2
+    assert "<underlying thesis refresh unavailable: graph failed>" in capsys.readouterr().out
+
+
+def test_refresh_helper_analyzes_underlying_not_occ_symbol():
+    module = _load_script()
+    snapshot = _snapshot()
+    profile = SimpleNamespace(
+        can_run=True,
+        asset_class="equity",
+        analysts=("market", "news"),
+        canonical_symbol="AAPL",
+        pipeline_asset_type="stock",
+        analysis_symbol="AAPL",
+    )
+    graph = SimpleNamespace()
+    graph.propagate = MagicMock(
+        return_value=({"trader_investment_plan": "**Action**: Buy"}, "Overweight")
+    )
+    graph.save_reports = MagicMock(return_value="/tmp/AAPL-report.md")
+    graph_factory = MagicMock(return_value=graph)
+    config_factory = MagicMock(return_value={"provider": "codex_cli"})
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+
+    with (
+        patch.object(module, "classify_instrument", return_value=profile) as classify,
+        patch.object(
+            module, "_graph_dependencies", return_value=(graph_factory, config_factory)
+        ),
+        patch.object(
+            module, "refresh_long_option_thesis", return_value=refresh
+        ) as refresh_gate,
+    ):
+        result, report = module._refresh_underlying_thesis(snapshot, "2026-09-10")
+
+    assert result is refresh
+    assert report == "/tmp/AAPL-report.md"
+    classify.assert_called_once_with("AAPL")
+    graph_factory.assert_called_once_with(
+        selected_analysts=["market", "news"],
+        config={"provider": "codex_cli"},
+        debug=False,
+    )
+    graph.propagate.assert_called_once_with(
+        "AAPL",
+        "2026-09-10",
+        asset_type="stock",
+        analysis_symbol="AAPL",
+    )
+    graph.save_reports.assert_called_once_with(
+        {"trader_investment_plan": "**Action**: Buy"}, "AAPL"
+    )
+    refresh_gate.assert_called_once_with("C", "Overweight", "**Action**: Buy")
+
+
+@pytest.mark.parametrize(
+    ("base", "refresh", "exit_policy", "expected"),
+    [
+        ("REPORT_ONLY", "INVALIDATED", False, "REPORT_ONLY"),
+        ("HOLD", "INVALIDATED", False, "HOLD"),
+        ("HOLD", "INVALIDATED", True, "EXIT"),
+        ("REVIEW", "INVALIDATED", True, "EXIT"),
+        ("EXIT", "CONFIRMED", False, "EXIT"),
+        ("HOLD", "NEUTRAL", True, "HOLD"),
+        ("REVIEW", "NEUTRAL", True, "REVIEW"),
+    ],
+)
+def test_final_status_only_uses_explicit_opposite_thesis_policy(
+    base, refresh, exit_policy, expected
+):
+    assert _load_script()._final_status(
+        base, refresh, exit_on_invalidation=exit_policy
+    ) == expected

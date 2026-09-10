@@ -4,6 +4,7 @@ from tradingagents.option_thesis_gate import (
     gate_long_option_purchase,
     gate_option_thesis,
     parse_trader_action,
+    refresh_long_option_thesis,
 )
 
 
@@ -130,3 +131,45 @@ def test_gate_result_is_immutable():
 
     with pytest.raises(AttributeError):
         result.direction = "bearish"
+
+
+@pytest.mark.parametrize(
+    ("right", "portfolio", "action", "status", "option_direction", "current_direction"),
+    [
+        ("C", "Buy", "Buy", "CONFIRMED", "bullish", "bullish"),
+        ("C", "Overweight", "Buy", "CONFIRMED", "bullish", "bullish"),
+        ("C", "Sell", "Sell", "INVALIDATED", "bullish", "bearish"),
+        ("C", "Underweight", "Sell", "INVALIDATED", "bullish", "bearish"),
+        ("C", "Hold", "Hold", "NEUTRAL", "bullish", None),
+        ("P", "Sell", "Sell", "CONFIRMED", "bearish", "bearish"),
+        ("P", "Underweight", "Sell", "CONFIRMED", "bearish", "bearish"),
+        ("P", "Buy", "Buy", "INVALIDATED", "bearish", "bullish"),
+        ("P", "Overweight", "Buy", "INVALIDATED", "bearish", "bullish"),
+        ("P", "Hold", "Hold", "NEUTRAL", "bearish", None),
+    ],
+)
+def test_refresh_long_option_thesis_distinguishes_confirmation_invalidation_and_neutral(
+    right, portfolio, action, status, option_direction, current_direction
+):
+    result = refresh_long_option_thesis(right, portfolio, f"**Action**: {action}")
+
+    assert result.status == status
+    assert result.option_direction == option_direction
+    assert result.current_direction == current_direction
+    assert result.portfolio_rating == portfolio
+    assert result.trader_action == action
+    if status == "NEUTRAL":
+        assert "not an opposite thesis" in result.reason
+
+
+@pytest.mark.parametrize("right", ["", "X", None, 1])
+def test_refresh_long_option_thesis_rejects_invalid_option_right(right):
+    with pytest.raises(ValueError, match="option_right must be C or P"):
+        refresh_long_option_thesis(right, "Buy", "**Action**: Buy")
+
+
+def test_refresh_long_option_thesis_result_is_immutable():
+    result = refresh_long_option_thesis("C", "Buy", "**Action**: Buy")
+
+    with pytest.raises(AttributeError):
+        result.status = "INVALIDATED"

@@ -11,6 +11,7 @@ from tradingagents.agents.utils.rating import RATING_REVIEW, extract_rating
 
 OptionDirection = Literal["bullish", "bearish"]
 TraderAction = Literal["Buy", "Hold", "Sell"]
+ThesisRefreshStatus = Literal["CONFIRMED", "INVALIDATED", "NEUTRAL"]
 
 _FINAL_ACTION_RE = re.compile(
     r"^\s*(?:\*\*)?FINAL TRANSACTION PROPOSAL(?:\*\*)?\s*:\s*"
@@ -31,6 +32,18 @@ class OptionThesisGate:
     portfolio_rating: str | None
     trader_action: TraderAction | None
     direction: OptionDirection | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class LongOptionThesisRefresh:
+    """Current underlying thesis relative to an existing long call or put."""
+
+    option_direction: OptionDirection
+    current_direction: OptionDirection | None
+    status: ThesisRefreshStatus
+    portfolio_rating: str | None
+    trader_action: TraderAction | None
     reason: str
 
 
@@ -114,4 +127,59 @@ def gate_option_thesis(
         trader_action,
         None,
         "NO OPTION TRADE: portfolio rating and trader action lack directional consensus",
+    )
+
+
+def refresh_long_option_thesis(
+    option_right: str,
+    portfolio_decision: str | None,
+    trader_investment_plan: str | None,
+) -> LongOptionThesisRefresh:
+    """Compare refreshed underlying consensus with the direction of an existing long option.
+
+    A long call needs bullish consensus and a long put needs bearish consensus.
+    Lack of consensus is NEUTRAL, not INVALIDATED. Only an explicit opposite
+    consensus invalidates the original directional thesis.
+    """
+
+    right = option_right.upper() if isinstance(option_right, str) else ""
+    if right == "C":
+        option_direction: OptionDirection = "bullish"
+    elif right == "P":
+        option_direction = "bearish"
+    else:
+        raise ValueError("option_right must be C or P")
+
+    gate = gate_option_thesis(portfolio_decision, trader_investment_plan)
+    if gate.direction is None:
+        return LongOptionThesisRefresh(
+            option_direction=option_direction,
+            current_direction=None,
+            status="NEUTRAL",
+            portfolio_rating=gate.portfolio_rating,
+            trader_action=gate.trader_action,
+            reason=(
+                "refreshed underlying thesis has no directional PM/Trader consensus; "
+                "absence of confirmation is not an opposite thesis"
+            ),
+        )
+    if gate.direction == option_direction:
+        return LongOptionThesisRefresh(
+            option_direction=option_direction,
+            current_direction=gate.direction,
+            status="CONFIRMED",
+            portfolio_rating=gate.portfolio_rating,
+            trader_action=gate.trader_action,
+            reason=f"refreshed {gate.direction} consensus confirms the existing long option direction",
+        )
+    return LongOptionThesisRefresh(
+        option_direction=option_direction,
+        current_direction=gate.direction,
+        status="INVALIDATED",
+        portfolio_rating=gate.portfolio_rating,
+        trader_action=gate.trader_action,
+        reason=(
+            f"refreshed {gate.direction} consensus is opposite the existing "
+            f"{option_direction} long-option thesis"
+        ),
     )
