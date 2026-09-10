@@ -128,3 +128,19 @@ def test_equity_and_crypto_funds_include_social_but_not_fundamentals(symbol):
 )
 def test_partial_notes_name_missing_domain_analytics(symbol, phrase):
     assert phrase in classify_instrument(symbol).notes
+
+
+@pytest.mark.parametrize(
+    ("symbol", "required_notes"),
+    [
+        ("EURUSD", ("forward points", "realized carry", "robust positioning")),
+        ("GC=F", ("inventory", "physical supply-demand", "term-structure")),
+    ],
+)
+def test_cross_asset_profiles_remain_partial_with_explicit_data_gaps(
+    symbol, required_notes
+):
+    profile = classify_instrument(symbol)
+
+    assert profile.capability == "PARTIAL"
+    assert all(note in profile.notes for note in required_notes)

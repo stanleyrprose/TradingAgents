@@ -14,7 +14,10 @@ from tradingagents.agents.utils.fundamental_data_tools import (
     get_fundamentals,
     get_income_statement,
 )
-from tradingagents.agents.utils.macro_data_tools import get_macro_indicators
+from tradingagents.agents.utils.macro_data_tools import (
+    get_cross_asset_context,
+    get_macro_indicators,
+)
 from tradingagents.agents.utils.market_data_validation_tools import get_verified_market_snapshot
 from tradingagents.agents.utils.news_data_tools import (
     get_global_news,
@@ -23,6 +26,7 @@ from tradingagents.agents.utils.news_data_tools import (
 )
 from tradingagents.agents.utils.prediction_markets_tools import get_prediction_markets
 from tradingagents.agents.utils.technical_indicators_tools import get_indicators
+from tradingagents.instrument_router import classify_instrument
 
 # Public surface: the data tools are imported here so agents and the graph
 # import them from one place, plus the instrument/language helpers defined below.
@@ -37,6 +41,7 @@ __all__ = [
     "get_global_news",
     "get_insider_transactions",
     "get_macro_indicators",
+    "get_cross_asset_context",
     "get_prediction_markets",
     "get_verified_market_snapshot",
     "build_instrument_context",
@@ -145,8 +150,21 @@ def build_instrument_context(
     classification are injected so agents anchor to the real company rather
     than pattern-matching the price chart to a wrong one (#814).
     """
-    is_crypto = asset_type == "crypto"
+    profile = classify_instrument(ticker)
+    is_crypto = asset_type == "crypto" or (
+        profile.primary_type == "crypto"
+        and profile.asset_class == "crypto"
+        and profile.instrument_kind == "spot"
+    )
+    is_ordinary_equity = (
+        profile.primary_type == "stock"
+        and profile.asset_class == "equity"
+        and profile.instrument_kind == "stock"
+        and not is_crypto
+    )
     instrument_label = "asset" if is_crypto else "instrument"
+    if not is_ordinary_equity and not is_crypto:
+        instrument_label = "market instrument"
     context = (
         f"The {instrument_label} to analyze is `{ticker}`. "
         "Use this exact ticker in every tool call, report, and recommendation, "
@@ -157,21 +175,23 @@ def build_instrument_context(
     if identity:
         name = identity.get("company_name") or identity.get("name")
         if name:
-            details.append(f"{'Name' if is_crypto else 'Company'}: {name}")
+            details.append(f"{'Company' if is_ordinary_equity else 'Name'}: {name}")
         sector, industry = identity.get("sector"), identity.get("industry")
-        if sector and industry:
-            details.append(f"Business classification: {sector} / {industry}")
-        elif sector:
-            details.append(f"Sector: {sector}")
-        elif industry:
-            details.append(f"Industry: {industry}")
+        if is_ordinary_equity:
+            if sector and industry:
+                details.append(f"Business classification: {sector} / {industry}")
+            elif sector:
+                details.append(f"Sector: {sector}")
+            elif industry:
+                details.append(f"Industry: {industry}")
         if identity.get("exchange"):
             details.append(f"Exchange: {identity['exchange']}")
 
     if details:
+        subject = "company" if is_ordinary_equity else "instrument"
         context += (
             f" Resolved identity: {'; '.join(details)}. "
-            "Do not substitute a different company or ticker unless a tool "
+            f"Do not substitute a different {subject} or ticker unless a tool "
             "result explicitly disproves this resolved identity."
         )
 
@@ -179,6 +199,15 @@ def build_instrument_context(
         context += (
             " Treat it as a crypto asset rather than a company, and do not "
             "assume company fundamentals are available."
+        )
+    elif not is_ordinary_equity:
+        context += (
+            " Instrument profile: "
+            f"primary_type={profile.primary_type}; asset_class={profile.asset_class}; "
+            f"instrument_kind={profile.instrument_kind}. "
+            "Treat it explicitly as a market instrument, not a company; company "
+            "fundamentals must not be assumed. Do not substitute a different "
+            "instrument or ticker."
         )
     return context
 
@@ -226,6 +255,5 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
 
 

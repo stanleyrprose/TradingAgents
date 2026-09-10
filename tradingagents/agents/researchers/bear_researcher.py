@@ -3,6 +3,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     opponent_argument_or_opening,
 )
+from tradingagents.instrument_router import classify_instrument
 
 
 def create_bear_researcher(llm):
@@ -19,15 +20,15 @@ def create_bear_researcher(llm):
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         instrument_context = get_instrument_context_from_state(state)
-        asset_type = state.get("asset_type", "stock")
-        target_label = "stock" if asset_type == "stock" else "asset"
-        fundamentals_label = (
-            "Company fundamentals report"
-            if asset_type == "stock"
-            else "Asset fundamentals report (may be unavailable for crypto)"
+        profile = classify_instrument(state["company_of_interest"])
+        is_ordinary_equity = (
+            profile.primary_type == "stock"
+            and profile.asset_class == "equity"
+            and profile.instrument_kind == "stock"
         )
 
-        prompt = f"""You are a Bear Analyst making the case against investing in the {target_label}. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
+        if is_ordinary_equity:
+            prompt = f"""You are a Bear Analyst making the case against investing in the stock. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
 
 Key points to focus on:
 
@@ -43,11 +44,33 @@ Resources available:
 Market research report: {market_research_report}
 Social media sentiment report: {sentiment_report}
 Latest world affairs news: {news_report}
-{fundamentals_label}: {fundamentals_report}
+Company fundamentals report: {fundamentals_report}
 Conversation history of the debate: {history}
 Last bull argument: {current_response}
-Use this information to deliver a compelling bear argument, refute the bull's claims, and engage in a dynamic debate that demonstrates the risks and weaknesses of investing in the {target_label}.
-""" + get_language_instruction()
+Use this information to deliver a compelling bear argument, refute the bull's claims, and engage in a dynamic debate that demonstrates the risks and weaknesses of investing in the stock.
+"""
+        else:
+            prompt = f"""You are a Bear Analyst advocating against a long position in the market instrument. Build a strong, evidence-based downside case without assuming it is a company.
+
+Key points to focus on:
+- Macro and Flow Drivers: Explain the macro regime, cross-asset relationships, liquidity, and flows that create downside risk.
+- Market Structure and Positioning: Discuss positioning, flows, or market structure only where the reports provide evidence; do not invent unavailable data.
+- Price Behavior: Evaluate trend, momentum, and volatility, including signs of deterioration or asymmetric risk.
+- Catalysts and Invalidation: Identify concrete bearish catalysts, key levels, and conditions that would invalidate the thesis.
+- Direct Rebuttal: Engage directly with the bull analyst's claims using specific evidence, or open with your own case when the bull has not spoken.
+
+Resources available:
+{instrument_context}
+Market research report: {market_research_report}
+Social media sentiment report: {sentiment_report}
+Latest world affairs news: {news_report}
+Contextual/fundamental report (may be unavailable or not applicable): {fundamentals_report}
+Conversation history of the debate: {history}
+Last bull argument: {current_response}
+Use this information to present the bearish thesis, its catalysts, its invalidation conditions, and a direct rebuttal of the bull case.
+"""
+
+        prompt += get_language_instruction()
 
         response = llm.invoke(prompt)
 

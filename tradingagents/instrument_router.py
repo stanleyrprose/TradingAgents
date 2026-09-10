@@ -194,7 +194,9 @@ def _analytics(primary: str, asset_class: str, kind: str) -> tuple[str, tuple[st
     if primary == "index" or asset_class == "index":
         missing.append("index breadth and constituent internals")
     if primary == "forex" or asset_class == "forex":
-        missing.append("forex carry, rate-differential, and positioning analytics")
+        missing.append(
+            "dedicated forex forward points/realized carry and robust positioning analytics"
+        )
     if primary == "rate" or asset_class == "rate":
         missing.append("rate curve and term-premium analytics")
     if primary == "volatility" or asset_class == "volatility":

@@ -95,7 +95,6 @@ class BuildInstrumentContextTests(unittest.TestCase):
         self.assertIn("Name: Bitcoin USD", context)
         self.assertIn("crypto asset rather than a company", context)
 
-
 @pytest.mark.unit
 class GetInstrumentContextFromStateTests(unittest.TestCase):
     def test_prefers_precomputed_context(self):
@@ -116,6 +115,39 @@ class GetInstrumentContextFromStateTests(unittest.TestCase):
             {"company_of_interest": "BTC-USD", "asset_type": "crypto"}
         )
         self.assertIn("crypto asset", context)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ticker", "name", "asset_class", "instrument_kind"),
+    [
+        ("EURUSD=X", "EUR/USD", "forex", "spot"),
+        ("GC=F", "Gold Futures", "commodity", "future"),
+    ],
+)
+def test_cross_asset_identity_is_not_described_as_a_company(
+    ticker, name, asset_class, instrument_kind
+):
+    context = build_instrument_context(
+        ticker,
+        "stock",
+        {
+            "company_name": name,
+            "sector": "Fake Sector",
+            "industry": "Fake Industry",
+            "exchange": "CCY",
+        },
+    )
+
+    assert "market instrument" in context
+    assert f"primary_type={asset_class}" in context
+    assert f"asset_class={asset_class}" in context
+    assert f"instrument_kind={instrument_kind}" in context
+    assert f"Name: {name}" in context
+    assert "Company:" not in context
+    assert "Business classification:" not in context
+    assert "Fake Sector" not in context
+    assert "company fundamentals must not be assumed" in context
 
 
 @pytest.mark.unit
