@@ -1,10 +1,15 @@
 from datetime import date
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
 
 from tradingagents.agents.utils.options_data_tools import get_equity_option_context
-from tradingagents.dataflows.equity_options import _parse_occ, fetch_equity_option_context
+from tradingagents.dataflows.equity_options import (
+    _parse_occ,
+    fetch_equity_option_context,
+    fetch_equity_option_snapshot,
+)
 
 TODAY = date(2026, 9, 10)
 SYMBOL = "AAPL260918C00300000"
@@ -272,3 +277,108 @@ def test_options_data_tool_delegates_correctly():
 
     assert result == "context"
     fetch.assert_called_once_with(SYMBOL, TODAY.isoformat())
+
+
+def test_structured_snapshot_returns_exact_contract_without_markdown_parsing():
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            return_value=_response(_payload()),
+        ) as get,
+    ):
+        result = fetch_equity_option_snapshot(SYMBOL, TODAY.isoformat())
+
+    assert result.available
+    assert result.unavailable_reason is None
+    assert result.snapshot is not None
+    snapshot = result.snapshot
+    assert snapshot.symbol == SYMBOL
+    assert snapshot.underlying == "AAPL"
+    assert snapshot.expiry == date(2026, 9, 18)
+    assert snapshot.right == "C"
+    assert snapshot.strike == 300
+    assert snapshot.as_of == TODAY
+    assert snapshot.dte == 8
+    assert snapshot.source_timestamp == "2026-09-10 15:45:00"
+    assert snapshot.underlying_spot == 315
+    assert snapshot.bid == 16
+    assert snapshot.ask == 18
+    assert snapshot.midpoint == 17
+    assert snapshot.spread_pct == pytest.approx(11.7647058824)
+    assert snapshot.last == 16.5
+    assert snapshot.iv == 0.30
+    assert snapshot.delta == 0.75
+    assert snapshot.gamma == 0.0123
+    assert snapshot.vega == 0.2345
+    assert snapshot.theta == -0.1234
+    assert snapshot.open_interest == 100
+    assert snapshot.volume == 10
+    get.assert_called_once()
+
+
+def test_structured_snapshot_preserves_zero_bid_as_liquidation_input():
+    payload = _payload()
+    payload["data"]["options"][0].update(bid=0, ask=0)
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            return_value=_response(payload),
+        ),
+    ):
+        result = fetch_equity_option_snapshot(SYMBOL, TODAY.isoformat())
+
+    assert result.available
+    assert result.snapshot is not None
+    assert result.snapshot.bid == 0
+    assert result.snapshot.ask == 0
+    assert result.snapshot.midpoint is None
+    assert result.snapshot.spread_pct is None
+
+
+def test_structured_snapshot_preflight_rejects_date_and_symbol_without_network():
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch("tradingagents.dataflows.equity_options.requests.get") as get,
+    ):
+        historical = fetch_equity_option_snapshot(SYMBOL, "2026-09-09")
+        invalid = fetch_equity_option_snapshot("bad", TODAY.isoformat())
+
+    assert not historical.available
+    assert "historical/future" in historical.unavailable_reason
+    assert not invalid.available
+    assert invalid.unavailable_reason == "invalid OCC option symbol"
+    get.assert_not_called()
+
+
+def test_structured_snapshot_missing_exact_contract_is_unavailable():
+    payload = _payload()
+    payload["data"]["options"] = payload["data"]["options"][1:]
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            return_value=_response(payload),
+        ),
+    ):
+        result = fetch_equity_option_snapshot(SYMBOL, TODAY.isoformat())
+
+    assert not result.available
+    assert result.snapshot is None
+    assert result.unavailable_reason == f"exact contract {SYMBOL} not found"
+
+
+def test_structured_snapshot_request_exception_is_fail_soft():
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            side_effect=requests.Timeout("late"),
+        ),
+    ):
+        result = fetch_equity_option_snapshot(SYMBOL, TODAY.isoformat())
+
+    assert not result.available
+    assert result.snapshot is None
+    assert result.unavailable_reason == "Timeout"

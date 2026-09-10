@@ -31,6 +31,45 @@ class _OCCContract:
     strike: float
 
 
+@dataclass(frozen=True)
+class EquityOptionSnapshot:
+    """Structured current delayed quote for one exact OCC equity option."""
+
+    symbol: str
+    underlying: str
+    expiry: date
+    right: str
+    strike: float
+    as_of: date
+    dte: int
+    source_timestamp: str | None
+    underlying_spot: float
+    bid: float | None
+    ask: float | None
+    midpoint: float | None
+    spread_pct: float | None
+    last: float | None
+    iv: float | None
+    delta: float | None
+    gamma: float | None
+    vega: float | None
+    theta: float | None
+    open_interest: float | None
+    volume: float | None
+
+
+@dataclass(frozen=True)
+class EquityOptionSnapshotResult:
+    """Structured exact-contract snapshot with fail-soft source semantics."""
+
+    snapshot: EquityOptionSnapshot | None
+    unavailable_reason: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.snapshot is not None and self.unavailable_reason is None
+
+
 def _today() -> date:
     """Return the local calendar date; kept separate for deterministic tests."""
     return date.today()
@@ -86,6 +125,111 @@ def _percent(value: float | None, decimals: int = 2) -> str:
 
 def _row_number(row: dict, field: str, *, positive: bool = False) -> float | None:
     return _finite(row.get(field), positive=positive)
+
+
+def _nonnegative_number(row: dict, field: str) -> float | None:
+    value = _row_number(row, field)
+    return value if value is not None and value >= 0 else None
+
+
+def fetch_equity_option_snapshot(
+    ticker: str,
+    end_date: str,
+    timeout: float = 15.0,
+) -> EquityOptionSnapshotResult:
+    """Return one structured current Cboe snapshot for an exact OCC contract.
+
+    The function intentionally does not substitute midpoint/last for the bid. A
+    long-position manager can therefore treat ``bid`` as a conservative delayed
+    liquidation proxy without parsing the human-readable option context report.
+    """
+
+    contract = _parse_occ(ticker)
+    if contract is None:
+        return EquityOptionSnapshotResult(None, "invalid OCC option symbol")
+
+    try:
+        requested_date = date.fromisoformat(end_date)
+    except (TypeError, ValueError):
+        return EquityOptionSnapshotResult(None, "invalid end_date; expected YYYY-MM-DD")
+
+    today = _today()
+    if requested_date != today:
+        return EquityOptionSnapshotResult(
+            None,
+            "current Cboe delayed chain cannot be used for historical/future point-in-time analysis",
+        )
+
+    try:
+        response = requests.get(
+            _URL.format(underlying=contract.root),
+            headers={"User-Agent": _UA},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("response payload is not an object")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise ValueError("response data is not an object")
+        options = data.get("options")
+        if not isinstance(options, list):
+            raise ValueError("response options is not a list")
+        spot = _finite(data.get("current_price"), positive=True)
+        if spot is None:
+            raise ValueError("current_price is missing or non-positive")
+        row = next(
+            (
+                item
+                for item in options
+                if isinstance(item, dict) and item.get("option") == contract.symbol
+            ),
+            None,
+        )
+        if row is None:
+            return EquityOptionSnapshotResult(
+                None, f"exact contract {contract.symbol} not found"
+            )
+
+        bid = _nonnegative_number(row, "bid")
+        ask = _nonnegative_number(row, "ask")
+        midpoint = None
+        spread_pct = None
+        if bid is not None and ask is not None and ask >= bid and bid + ask > 0:
+            midpoint = (bid + ask) / 2
+            if midpoint > 0:
+                spread_pct = (ask - bid) / midpoint * 100
+
+        timestamp = data.get("timestamp", payload.get("timestamp"))
+        timestamp_text = str(timestamp).strip() if timestamp is not None else ""
+        snapshot = EquityOptionSnapshot(
+            symbol=contract.symbol,
+            underlying=contract.root,
+            expiry=contract.expiry,
+            right=contract.right,
+            strike=contract.strike,
+            as_of=today,
+            dte=(contract.expiry - today).days,
+            source_timestamp=timestamp_text or None,
+            underlying_spot=spot,
+            bid=bid,
+            ask=ask,
+            midpoint=midpoint,
+            spread_pct=spread_pct,
+            last=_row_number(row, "last_trade_price"),
+            iv=_row_number(row, "iv", positive=True),
+            delta=_row_number(row, "delta"),
+            gamma=_row_number(row, "gamma"),
+            vega=_row_number(row, "vega"),
+            theta=_row_number(row, "theta"),
+            open_interest=_nonnegative_number(row, "open_interest"),
+            volume=_nonnegative_number(row, "volume"),
+        )
+        return EquityOptionSnapshotResult(snapshot)
+    except (requests.RequestException, TypeError, ValueError, OverflowError) as exc:
+        logger.warning("Cboe equity option snapshot fetch failed: %s", type(exc).__name__)
+        return EquityOptionSnapshotResult(None, type(exc).__name__)
 
 
 def _ratio(put_value: float, call_value: float) -> str:
