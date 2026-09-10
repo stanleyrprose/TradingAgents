@@ -22,6 +22,10 @@ def routed():
             "tradingagents.agents.utils.macro_data_tools.fetch_cftc_positioning",
             return_value="MOCK_CFTC_POSITIONING",
         ),
+        patch(
+            "tradingagents.agents.utils.macro_data_tools.fetch_eia_inventory",
+            side_effect=lambda ticker, _date: f"MOCK_EIA_INVENTORY:{ticker}",
+        ),
     ):
         yield route
 
@@ -65,8 +69,9 @@ def test_commodity_driver_baskets(ticker, expected, routed):
     result = _invoke(ticker)
 
     assert _series_requested(routed) == expected
-    assert "term structure are NOT provided" in result
+    assert "term structure remain unavailable" in result
     assert f"REPORT:{expected[0]}" in result
+    assert f"## EIA inventory\nMOCK_EIA_INVENTORY:{ticker}" in result
     if ticker == "GC=F":
         assert "## CFTC positioning\nMOCK_CFTC_POSITIONING" in result
 
@@ -98,6 +103,10 @@ def test_one_series_exception_does_not_abort_remaining_series():
         patch(
             "tradingagents.agents.utils.macro_data_tools.fetch_cftc_positioning",
             return_value="MOCK_CFTC_POSITIONING",
+        ),
+        patch(
+            "tradingagents.agents.utils.macro_data_tools.fetch_eia_inventory",
+            return_value="MOCK_EIA_INVENTORY:CL=F",
         ),
     ):
         result = _invoke("CL=F")

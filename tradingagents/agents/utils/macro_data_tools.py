@@ -3,6 +3,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from tradingagents.dataflows.cftc_positioning import fetch_cftc_positioning
+from tradingagents.dataflows.eia_inventory import fetch_eia_inventory
 from tradingagents.dataflows.interface import route_to_vendor
 from tradingagents.instrument_router import classify_instrument
 
@@ -142,13 +143,14 @@ def get_cross_asset_context(
         sources = [("Driver", series_id) for series_id in series_ids]
         header = (
             f"## Cross-asset commodity context: {symbol}\n"
-            "Inventory, physical supply-demand, and term structure are NOT provided "
-            "by this tool."
+            "Official weekly EIA energy inventory may be provided below. Comprehensive "
+            "physical supply-demand and term structure remain unavailable."
         )
         fred_context = f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
         return (
             f"{fred_context}\n\n## CFTC positioning\n"
-            f"{fetch_cftc_positioning(ticker, curr_date)}"
+            f"{fetch_cftc_positioning(ticker, curr_date)}\n\n## EIA inventory\n"
+            f"{fetch_eia_inventory(ticker, curr_date)}"
         )
 
     return (
