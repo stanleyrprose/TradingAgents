@@ -112,19 +112,27 @@ class TradingAgentsGraph:
         deep_provider = (
             self.config.get("deep_think_llm_provider") or legacy_provider
         ).lower()
+        trader_provider = (
+            self.config.get("trader_think_llm_provider") or quick_provider
+        ).lower()
 
         quick_llm_kwargs = self._get_provider_kwargs(quick_provider)
         deep_llm_kwargs = self._get_provider_kwargs(deep_provider)
+        trader_llm_kwargs = self._get_provider_kwargs(trader_provider)
 
         if self.callbacks:
             quick_llm_kwargs["callbacks"] = self.callbacks
             deep_llm_kwargs["callbacks"] = self.callbacks
+            trader_llm_kwargs["callbacks"] = self.callbacks
 
         quick_base_url = self._configure_role_provider(
             quick_provider, "quick", quick_llm_kwargs
         )
         deep_base_url = self._configure_role_provider(
             deep_provider, "deep", deep_llm_kwargs
+        )
+        trader_base_url = self._configure_role_provider(
+            trader_provider, "trader", trader_llm_kwargs
         )
 
         deep_client = create_llm_client(
@@ -139,9 +147,16 @@ class TradingAgentsGraph:
             base_url=quick_base_url,
             **quick_llm_kwargs,
         )
+        trader_client = create_llm_client(
+            provider=trader_provider,
+            model=self.config.get("trader_think_llm") or self.config["quick_think_llm"],
+            base_url=trader_base_url,
+            **trader_llm_kwargs,
+        )
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
+        self.trader_thinking_llm = trader_client.get_llm()
 
         self.memory_log = TradingMemoryLog(self.config)
 
@@ -156,6 +171,7 @@ class TradingAgentsGraph:
         self.graph_setup = GraphSetup(
             self.quick_thinking_llm,
             self.deep_thinking_llm,
+            self.trader_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
         )

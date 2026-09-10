@@ -11,6 +11,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_LLM_PROVIDER":         "llm_provider",
     "TRADINGAGENTS_DEEP_THINK_LLM":       "deep_think_llm",
     "TRADINGAGENTS_QUICK_THINK_LLM":      "quick_think_llm",
+    "TRADINGAGENTS_TRADER_THINK_LLM":     "trader_think_llm",
+    "TRADINGAGENTS_TRADER_THINK_LLM_PROVIDER": "trader_think_llm_provider",
+    "TRADINGAGENTS_TRADER_THINK_LLM_BACKEND_URL": "trader_think_llm_backend_url",
     "TRADINGAGENTS_QUICK_THINK_LLM_PROVIDER": "quick_think_llm_provider",
     "TRADINGAGENTS_DEEP_THINK_LLM_PROVIDER": "deep_think_llm_provider",
     "TRADINGAGENTS_QUICK_THINK_LLM_BACKEND_URL": "quick_think_llm_backend_url",
@@ -19,6 +22,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_CODEX_CLI_TIMEOUT_SECONDS": "codex_cli_timeout_seconds",
     "TRADINGAGENTS_CODEX_QUICK_REASONING_EFFORT": "codex_quick_reasoning_effort",
     "TRADINGAGENTS_CODEX_DEEP_REASONING_EFFORT": "codex_deep_reasoning_effort",
+    "TRADINGAGENTS_CODEX_TRADER_REASONING_EFFORT": "codex_trader_reasoning_effort",
     "TRADINGAGENTS_LLM_BACKEND_URL":      "backend_url",
     "TRADINGAGENTS_OUTPUT_LANGUAGE":      "output_language",
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
@@ -90,15 +94,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.6",
     "quick_think_llm": "gpt-5.6-luna",
+    "trader_think_llm": None,
     # Optional role-specific providers. None preserves the legacy llm_provider.
     "quick_think_llm_provider": None,
     "deep_think_llm_provider": None,
+    "trader_think_llm_provider": None,
     "quick_think_llm_backend_url": None,
     "deep_think_llm_backend_url": None,
+    "trader_think_llm_backend_url": None,
     "codex_cli_command": "codex",
     "codex_cli_timeout_seconds": 180,
     "codex_quick_reasoning_effort": "low",
     "codex_deep_reasoning_effort": "high",
+    "codex_trader_reasoning_effort": "medium",
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a

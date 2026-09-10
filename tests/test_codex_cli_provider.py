@@ -209,7 +209,7 @@ def test_structured_output_pydantic_schema_with_mocked_subprocess(monkeypatch):
 
 
 @pytest.mark.unit
-def test_graph_routes_quick_and_deep_reasoning_to_codex(monkeypatch, tmp_path):
+def test_graph_routes_quick_deep_and_trader_reasoning_to_codex(monkeypatch, tmp_path):
     import tradingagents.graph.trading_graph as graph_module
 
     calls = []
@@ -249,15 +249,19 @@ def test_graph_routes_quick_and_deep_reasoning_to_codex(monkeypatch, tmp_path):
             "llm_provider": "openai",
             "quick_think_llm": "quick-codex-model",
             "deep_think_llm": "deep-codex-model",
+            "trader_think_llm": "trader-codex-model",
             "quick_think_llm_provider": "codex_cli",
             "deep_think_llm_provider": "codex_cli",
+            "trader_think_llm_provider": "codex_cli",
             "backend_url": "https://api.example.invalid/v1",
             "quick_think_llm_backend_url": "https://ignored.invalid/v1",
             "deep_think_llm_backend_url": None,
+            "trader_think_llm_backend_url": None,
             "codex_cli_command": "codex-custom",
             "codex_cli_timeout_seconds": 91,
             "codex_quick_reasoning_effort": "minimal",
             "codex_deep_reasoning_effort": "high",
+            "codex_trader_reasoning_effort": "medium",
         }
     )
 
@@ -267,8 +271,8 @@ def test_graph_routes_quick_and_deep_reasoning_to_codex(monkeypatch, tmp_path):
         config=config,
     )
 
-    assert len(calls) == 2
-    deep_call, quick_call = calls
+    assert len(calls) == 3
+    deep_call, quick_call, trader_call = calls
     assert deep_call["provider"] == "codex_cli"
     assert deep_call["model"] == "deep-codex-model"
     assert deep_call["base_url"] is None
@@ -283,6 +287,13 @@ def test_graph_routes_quick_and_deep_reasoning_to_codex(monkeypatch, tmp_path):
     assert quick_call["kwargs"]["command"] == "codex-custom"
     assert quick_call["kwargs"]["timeout_seconds"] == 91
     assert quick_call["kwargs"]["reasoning_effort"] == "minimal"
+
+    assert trader_call["provider"] == "codex_cli"
+    assert trader_call["model"] == "trader-codex-model"
+    assert trader_call["base_url"] is None
+    assert trader_call["kwargs"]["command"] == "codex-custom"
+    assert trader_call["kwargs"]["timeout_seconds"] == 91
+    assert trader_call["kwargs"]["reasoning_effort"] == "medium"
 
 
 
