@@ -4,9 +4,12 @@ from unittest.mock import Mock, patch
 import pytest
 
 from tradingagents.dataflows.option_selector import (
+    OptionCandidate,
+    OptionSelectionResult,
     _eligible_candidates,
     _points,
     _rank_candidates,
+    rank_equity_option_contracts,
     select_equity_option_contract,
 )
 
@@ -322,3 +325,63 @@ def test_best_candidate_by_expiry_has_one_row_each_and_caps_at_eight():
     for day in range(17, 25):
         assert section.count(f"| 2026-09-{day:02d} |") == 1
     assert "| 2026-09-25 |" not in section
+
+
+def test_structured_result_retains_full_ranking_and_matches_report():
+    options = [
+        _option("260925", "C", 100 + index, delta=0.55 - index * 0.02)
+        for index in range(4)
+    ]
+    with (
+        patch("tradingagents.dataflows.option_selector._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.option_selector.requests.get",
+            return_value=_response(_payload(options)),
+        ) as get,
+    ):
+        result = rank_equity_option_contracts(
+            "aapl", "bullish", TODAY.isoformat(), top_n=1
+        )
+
+    assert isinstance(result, OptionSelectionResult)
+    assert result.available
+    assert len(result.candidates) == 4
+    assert all(isinstance(candidate, OptionCandidate) for candidate in result.candidates)
+    best = result.candidates[0]
+    assert f"**{best.symbol}** — score {best.score:.2f}/100" in result.report
+    top_section = result.report.split("## Top candidates", 1)[1].split(
+        "## Score breakdown", 1
+    )[0]
+    assert top_section.count("| 1 |") == 1
+    assert result.candidates[1].symbol not in top_section
+    get.assert_called_once()
+
+
+def test_structured_unavailable_matches_legacy_sentinel():
+    with patch("tradingagents.dataflows.option_selector.requests.get") as get:
+        structured = rank_equity_option_contracts(
+            "AAPL", "sideways", TODAY.isoformat()
+        )
+        legacy = select_equity_option_contract("AAPL", "sideways", TODAY.isoformat())
+
+    assert structured.candidates == ()
+    assert not structured.available
+    assert structured.unavailable_reason
+    assert structured.report == legacy
+    get.assert_not_called()
+
+
+def test_legacy_wrapper_returns_structured_report_with_one_request():
+    options = [_option("260925", "C", 100)]
+    with (
+        patch("tradingagents.dataflows.option_selector._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.option_selector.requests.get",
+            return_value=_response(_payload(options)),
+        ) as get,
+    ):
+        legacy = select_equity_option_contract("AAPL", "bullish", TODAY.isoformat())
+
+    assert "# Cboe delayed equity option contract selection" in legacy
+    assert options[0]["option"] in legacy
+    get.assert_called_once()

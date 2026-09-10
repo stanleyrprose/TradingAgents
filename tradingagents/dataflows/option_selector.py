@@ -29,7 +29,9 @@ _WEIGHTS = (
 
 
 @dataclass(frozen=True)
-class _Candidate:
+class OptionCandidate:
+    """One eligible option contract with its deterministic ranking details."""
+
     symbol: str
     expiry: date
     right: str
@@ -50,6 +52,19 @@ class _Candidate:
     required_move: float
     components: tuple[tuple[str, float, float], ...]
     score: float
+
+
+@dataclass(frozen=True)
+class OptionSelectionResult:
+    """Structured current-chain selection plus its backward-compatible report."""
+
+    candidates: tuple[OptionCandidate, ...]
+    report: str
+    unavailable_reason: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return bool(self.candidates)
 
 
 def _unavailable(reason: str) -> str:
@@ -195,9 +210,9 @@ def _rank_candidates(
     target_dte: int,
     min_dte: int,
     max_dte: int,
-) -> list[_Candidate]:
+) -> list[OptionCandidate]:
     median_iv = median(float(candidate["iv"]) for candidate in raw_candidates)
-    scored: list[_Candidate] = []
+    scored: list[OptionCandidate] = []
     for candidate in raw_candidates:
         components = _points(
             candidate,
@@ -208,7 +223,7 @@ def _rank_candidates(
             median_iv=median_iv,
         )
         scored.append(
-            _Candidate(
+            OptionCandidate(
                 **candidate,
                 components=components,
                 score=round(sum(points for _, points, _ in components), 2),
@@ -236,7 +251,7 @@ def _number(value: float, decimals: int = 2) -> str:
     return rendered.rstrip("0").rstrip(".") if decimals else rendered
 
 
-def _candidate_row(rank: int | str, item: _Candidate) -> str:
+def _candidate_row(rank: int | str, item: OptionCandidate) -> str:
     theta = "N/A" if item.theta is None else _number(item.theta, 4)
     burden = "N/A" if item.theta_burden is None else f"{item.theta_burden * 100:.2f}%"
     return (
@@ -250,7 +265,7 @@ def _candidate_row(rank: int | str, item: _Candidate) -> str:
 
 
 def _render_report(
-    ranked: list[_Candidate],
+    ranked: list[OptionCandidate],
     *,
     underlying: str,
     spot: float,
@@ -311,7 +326,7 @@ def _render_report(
     )
     lines.append(f"| **Total** | **{best.score:.2f}** | **100.00** |")
 
-    by_expiry: dict[date, _Candidate] = {}
+    by_expiry: dict[date, OptionCandidate] = {}
     for item in ranked:
         by_expiry.setdefault(item.expiry, item)
     lines.extend(
@@ -341,7 +356,7 @@ def _render_report(
     return "\n".join(lines)
 
 
-def select_equity_option_contract(
+def rank_equity_option_contracts(
     underlying: str,
     direction: str,
     end_date: str,
@@ -350,25 +365,29 @@ def select_equity_option_contract(
     target_delta: float = 0.55,
     top_n: int = 5,
     timeout: float = 15.0,
-) -> str:
-    """Select and explain one current-chain long call or put contract."""
+) -> OptionSelectionResult:
+    """Rank the current delayed chain and return structured candidates and report."""
+
+    def unavailable(reason: str) -> OptionSelectionResult:
+        return OptionSelectionResult((), _unavailable(reason), reason)
+
     if not isinstance(underlying, str):
-        return _unavailable("invalid underlying; expected 1-6 letters")
+        return unavailable("invalid underlying; expected 1-6 letters")
     normalized = underlying.upper()
     if _UNDERLYING_RE.fullmatch(normalized) is None:
-        return _unavailable("invalid underlying; expected 1-6 letters")
+        return unavailable("invalid underlying; expected 1-6 letters")
     if not isinstance(direction, str) or direction.lower() not in {"bullish", "bearish"}:
-        return _unavailable("unsupported direction; use bullish or bearish")
+        return unavailable("unsupported direction; use bullish or bearish")
     normalized_direction = direction.lower()
     if not isinstance(end_date, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_date) is None:
-        return _unavailable("invalid end_date; expected YYYY-MM-DD")
+        return unavailable("invalid end_date; expected YYYY-MM-DD")
     try:
         requested_date = date.fromisoformat(end_date)
     except ValueError:
-        return _unavailable("invalid end_date; expected YYYY-MM-DD")
+        return unavailable("invalid end_date; expected YYYY-MM-DD")
     today = _today()
     if requested_date != today:
-        return _unavailable(
+        return unavailable(
             "current Cboe delayed chain cannot be used for historical/future selection"
         )
     if (
@@ -378,16 +397,16 @@ def select_equity_option_contract(
         or not isinstance(max_dte, int)
         or not 1 <= min_dte <= max_dte <= 365
     ):
-        return _unavailable("invalid DTE range; require 1 <= min_dte <= max_dte <= 365")
+        return unavailable("invalid DTE range; require 1 <= min_dte <= max_dte <= 365")
     if (
         isinstance(target_delta, bool)
         or not isinstance(target_delta, (int, float))
         or not math.isfinite(target_delta)
         or not 0.10 <= target_delta <= 0.90
     ):
-        return _unavailable("invalid target_delta; require 0.10 through 0.90")
+        return unavailable("invalid target_delta; require 0.10 through 0.90")
     if isinstance(top_n, bool) or not isinstance(top_n, int) or not 1 <= top_n <= 20:
-        return _unavailable("invalid top_n; require 1 through 20")
+        return unavailable("invalid top_n; require 1 through 20")
 
     right = "C" if normalized_direction == "bullish" else "P"
     try:
@@ -419,7 +438,7 @@ def select_equity_option_contract(
             max_dte=max_dte,
         )
         if not raw_candidates:
-            return _unavailable("no eligible contracts in the current delayed chain")
+            return unavailable("no eligible contracts in the current delayed chain")
         target_dte = max(min_dte, min(21, max_dte))
         ranked = _rank_candidates(
             raw_candidates,
@@ -428,17 +447,43 @@ def select_equity_option_contract(
             min_dte=min_dte,
             max_dte=max_dte,
         )
-        return _render_report(
-            ranked,
-            underlying=normalized,
-            spot=spot,
-            timestamp=data.get("timestamp", payload.get("timestamp")),
-            direction=normalized_direction,
-            min_dte=min_dte,
-            max_dte=max_dte,
-            target_delta=float(target_delta),
-            top_n=top_n,
+        return OptionSelectionResult(
+            tuple(ranked),
+            _render_report(
+                ranked,
+                underlying=normalized,
+                spot=spot,
+                timestamp=data.get("timestamp", payload.get("timestamp")),
+                direction=normalized_direction,
+                min_dte=min_dte,
+                max_dte=max_dte,
+                target_delta=float(target_delta),
+                top_n=top_n,
+            ),
         )
     except (requests.RequestException, TypeError, ValueError, OverflowError):
         logger.warning("Cboe option selection failed")
-        return _unavailable("Cboe delayed chain request or payload failed")
+        return unavailable("Cboe delayed chain request or payload failed")
+
+
+def select_equity_option_contract(
+    underlying: str,
+    direction: str,
+    end_date: str,
+    min_dte: int = 7,
+    max_dte: int = 45,
+    target_delta: float = 0.55,
+    top_n: int = 5,
+    timeout: float = 15.0,
+) -> str:
+    """Select and explain one current-chain long call or put contract."""
+    return rank_equity_option_contracts(
+        underlying,
+        direction,
+        end_date,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        target_delta=target_delta,
+        top_n=top_n,
+        timeout=timeout,
+    ).report

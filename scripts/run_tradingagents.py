@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import datetime
-import os
 
 from tradingagents.instrument_router import PRIMARY_TYPES, classify_instrument
 
@@ -55,24 +54,10 @@ def main():
             flush=True,
         )
         return 2
-    from tradingagents.default_config import DEFAULT_CONFIG
     from tradingagents.graph.trading_graph import TradingAgentsGraph
-    config = DEFAULT_CONFIG.copy()
-    defaults = {
-        "TRADINGAGENTS_QUICK_THINK_LLM_PROVIDER": ("quick_think_llm_provider", "codex_cli"),
-        "TRADINGAGENTS_QUICK_THINK_LLM": ("quick_think_llm", "gpt-5.6-luna"),
-        "TRADINGAGENTS_CODEX_QUICK_REASONING_EFFORT": ("codex_quick_reasoning_effort", "low"),
-        "TRADINGAGENTS_TRADER_THINK_LLM_PROVIDER": ("trader_think_llm_provider", "codex_cli"),
-        "TRADINGAGENTS_TRADER_THINK_LLM": ("trader_think_llm", "gpt-5.6-sol"),
-        "TRADINGAGENTS_CODEX_TRADER_REASONING_EFFORT": ("codex_trader_reasoning_effort", "medium"),
-        "TRADINGAGENTS_DEEP_THINK_LLM_PROVIDER": ("deep_think_llm_provider", "codex_cli"),
-        "TRADINGAGENTS_DEEP_THINK_LLM": ("deep_think_llm", "gpt-5.6-sol"),
-        "TRADINGAGENTS_CODEX_DEEP_REASONING_EFFORT": ("codex_deep_reasoning_effort", "high"),
-        "TRADINGAGENTS_CHECKPOINT_ENABLED": ("checkpoint_enabled", True),
-    }
-    for env, (key, value) in defaults.items():
-        if env not in os.environ:
-            config[key] = value
+    from tradingagents.runner_config import build_codex_oauth_config
+
+    config = build_codex_oauth_config()
     graph = TradingAgentsGraph(selected_analysts=list(profile.analysts), config=config, debug=False)
     final_state, decision = graph.propagate(
         profile.canonical_symbol,
