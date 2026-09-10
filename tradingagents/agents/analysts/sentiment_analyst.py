@@ -5,13 +5,15 @@ the old version had a prompt that demanded social-media analysis but the
 only tool available was Yahoo Finance news — which led LLMs to fabricate
 Reddit/X/StockTwits content under prompt pressure (verified live).
 
-The redesigned agent pre-fetches three complementary data sources before
+The redesigned agent pre-fetches complementary data sources before
 the LLM is invoked and injects them into the prompt as structured blocks:
 
   1. News headlines     — Yahoo Finance (institutional framing)
-  2. StockTwits messages — retail-trader posts indexed by cashtag, with
-                           user-labeled Bullish/Bearish sentiment tags
-  3. Reddit posts        — r/wallstreetbets, r/stocks, r/investing
+  2. Reddit posts        — retail narrative and engagement
+  3. Crypto regime       — Alternative.me Fear & Greed (crypto only)
+  4. Options positioning — Deribit public summaries (BTC/ETH only)
+
+StockTwits is included only as an optional, credential-dependent source.
 
 The agent does not use tool-calling; the data is in the prompt from
 turn 0. Output uses the structured-output pattern (json_schema for
@@ -40,6 +42,8 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.dataflows.crypto_fear_greed import fetch_crypto_fear_greed
+from tradingagents.dataflows.deribit_sentiment import fetch_deribit_options_sentiment
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 
@@ -51,7 +55,7 @@ def _seven_days_back(trade_date: str) -> str:
 def create_sentiment_analyst(llm):
     """Create a sentiment analyst node for the trading graph.
 
-    Pre-fetches news + StockTwits + Reddit data, injects them into the
+    Pre-fetches applicable sentiment data, injects it into the
     prompt as structured blocks, and produces a deterministic sentiment
     report via structured output (with a free-text fallback for providers
     that do not support it).
@@ -63,6 +67,7 @@ def create_sentiment_analyst(llm):
         end_date = state["trade_date"]
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
+        is_crypto = state.get("asset_type") == "crypto"
 
         # Pre-fetch all three sources. Each fetcher degrades gracefully and
         # returns a string (no exceptions surface from here), so the LLM
@@ -74,6 +79,12 @@ def create_sentiment_analyst(llm):
             ticker, limit=30, start_date=start_date, end_date=end_date
         )
         reddit_block = fetch_reddit_posts(ticker, start_date=start_date, end_date=end_date)
+        if is_crypto:
+            fear_greed_block = fetch_crypto_fear_greed(end_date=end_date)
+            deribit_block = fetch_deribit_options_sentiment(ticker, end_date=end_date)
+        else:
+            fear_greed_block = "<crypto fear-greed not applicable: non-crypto instrument>"
+            deribit_block = "<deribit options not applicable: non-crypto instrument>"
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -82,6 +93,8 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            fear_greed_block=fear_greed_block,
+            deribit_block=deribit_block,
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -135,9 +148,11 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    fear_greed_block: str,
+    deribit_block: str,
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
-    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, using the applicable sources already collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
 
@@ -148,8 +163,8 @@ Institutional framing. Fact-driven, slower-moving signal.
 {news_block}
 <end_of_news>
 
-### StockTwits messages — retail-trader social platform indexed by cashtag
-Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish / Bearish / no-label) plus the message body.
+### StockTwits messages — optional credential-dependent retail source
+Use only when official credentials made data available. It is supplementary, not a required or main source.
 
 <start_of_stocktwits>
 {stocktwits_block}
@@ -162,23 +177,39 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 {reddit_block}
 <end_of_reddit>
 
+### Alternative.me Crypto Fear & Greed — broad crypto-market regime
+This is market-wide sentiment, not an ETH- or BTC-specific signal.
+
+<start_of_crypto_fear_greed>
+{fear_greed_block}
+<end_of_crypto_fear_greed>
+
+### Deribit public options — BTC/ETH positioning
+Aggregate options positioning is available only for supported crypto assets.
+
+<start_of_deribit_options>
+{deribit_block}
+<end_of_deribit_options>
+
 ## How to analyze this data (best practices)
 
-1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone.
+1. **Treat Crypto Fear & Greed as a broad regime indicator.** It is not asset-specific and extremes can be contrarian, so do not translate its level mechanically into a directional forecast.
 
-2. **Look for cross-source divergences.** If news framing is bearish but StockTwits is overwhelmingly bullish, that mismatch is itself a signal — it can mean retail is leaning into a thesis the news flow hasn't caught up to (or vice versa, that retail is chasing while institutions are cautious).
+2. **Treat Deribit put/call ratios as positioning proxies.** They describe aggregate options positioning and activity, not standalone bullish or bearish forecasts.
 
-3. **Weight Reddit posts by engagement.** A 400-upvote / 200-comment thread reflects community attention; a 3-upvote post is noise. Read the body excerpts for context — the title alone often misleads.
+3. **Treat Reddit as retail narrative and weight it by engagement.** A 400-upvote / 200-comment thread reflects community attention; a 3-upvote post is noise. Titles and popularity do not establish facts.
 
-4. **Distinguish opinion from event.** A news headline ("Nvidia announces $500M Corning deal") is an event; a StockTwits post ("buying NVDA, this is going to moon") is opinion. Both are inputs but should be weighted differently in your conclusions.
+4. **Use StockTwits only if official credentials made it available.** Treat it as supplementary retail opinion, respect sample size, and never infer missing StockTwits data.
 
-5. **Identify recurring narrative themes.** What topic keeps coming up across sources? That's the dominant narrative driving current sentiment.
+5. **Look for cross-source divergences and distinguish opinion from event.** News reports events; social posts express opinions. Weight them accordingly.
 
-6. **Be honest about data limits.** If StockTwits returned only a handful of messages, or one or more sources returned an "<unavailable>" placeholder, the sentiment read is less robust — flag this explicitly in the `confidence` field and the narrative. If the sources are silent on a given subreddit, say so.
+6. **Identify recurring narrative themes.** What topic keeps coming up across sources? That's the dominant narrative driving current sentiment.
 
-7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
+7. **Be honest about data limits.** Unavailable, unsupported, or not-applicable sources are not evidence. Reduce confidence when important applicable sources are sparse.
 
-8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+8. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
+
+9. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
 
 ## Output fields
 

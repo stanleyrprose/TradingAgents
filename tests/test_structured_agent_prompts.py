@@ -113,6 +113,8 @@ def test_sentiment_prompt_states_constraint(monkeypatch):
     # Pre-fetched sources are stubbed so the prompt builds without network I/O.
     monkeypatch.setattr(sentiment, "fetch_stocktwits_messages", lambda *a, **k: "st")
     monkeypatch.setattr(sentiment, "fetch_reddit_posts", lambda *a, **k: "rd")
+    monkeypatch.setattr(sentiment, "fetch_crypto_fear_greed", lambda *a, **k: "fg")
+    monkeypatch.setattr(sentiment, "fetch_deribit_options_sentiment", lambda *a, **k: "di")
     monkeypatch.setattr(sentiment.get_news, "func", lambda *a, **k: "news", raising=False)
 
     captured = {}
@@ -126,6 +128,8 @@ def test_sentiment_prompt_states_constraint(monkeypatch):
     })
     text = _prompt_text(captured["prompt"])
     assert NO_EXTERNAL_TOOLS in text
+    assert "<crypto fear-greed not applicable: non-crypto instrument>" in text
+    assert "<deribit options not applicable: non-crypto instrument>" in text
     # This agent binds no tools, so tool-range wording must not reappear.
     assert "tool-call date ranges" not in text
 
