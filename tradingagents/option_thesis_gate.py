@@ -34,6 +34,15 @@ class OptionThesisGate:
     reason: str
 
 
+@dataclass(frozen=True)
+class LongOptionApproval:
+    """Strict post-analysis approval result for buying one option contract."""
+
+    approved: bool
+    portfolio_rating: str | None
+    trader_action: TraderAction | None
+
+
 def parse_trader_action(text: str) -> TraderAction | None:
     """Parse only explicit TraderProposal labels, preferring the final label.
 
@@ -56,6 +65,26 @@ def _portfolio_rating(decision: str | None) -> str | None:
     if unicodedata.normalize("NFKC", decision).strip().upper() == RATING_REVIEW:
         return RATING_REVIEW
     return extract_rating(decision)
+
+
+def gate_long_option_purchase(
+    portfolio_decision: str | None,
+    trader_investment_plan: str | None,
+) -> LongOptionApproval:
+    """Approve long premium only for PM Buy/Overweight plus explicit Trader Buy.
+
+    This gate deliberately does not interpret call/put direction. It applies to the
+    deeply analyzed option contract itself, so an approved long put is still a buy.
+    """
+    portfolio_rating = _portfolio_rating(portfolio_decision)
+    trader_action = parse_trader_action(trader_investment_plan or "")
+    return LongOptionApproval(
+        approved=(
+            portfolio_rating in {"Buy", "Overweight"} and trader_action == "Buy"
+        ),
+        portfolio_rating=portfolio_rating,
+        trader_action=trader_action,
+    )
 
 
 def gate_option_thesis(

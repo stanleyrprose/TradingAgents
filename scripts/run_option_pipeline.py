@@ -7,7 +7,11 @@ from datetime import date
 
 from tradingagents.dataflows.option_selector import rank_equity_option_contracts
 from tradingagents.instrument_router import classify_instrument
-from tradingagents.option_thesis_gate import gate_option_thesis
+from tradingagents.option_capital_allocator import (
+    allocate_long_option_premium_risk,
+    resolve_long_option_risk_budget,
+)
+from tradingagents.option_thesis_gate import gate_long_option_purchase, gate_option_thesis
 
 _CBOE_UNDERLYING_RE = re.compile(r"[A-Z]{1,6}")
 
@@ -28,6 +32,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-delta", type=float, default=0.55)
     parser.add_argument("--top", type=int, default=5, help="number of ranked candidates to show")
     parser.add_argument("--analyze-top", type=int, choices=(1, 3), default=1)
+    parser.add_argument("--account-equity", type=float)
+    parser.add_argument("--max-risk-pct", type=float)
+    parser.add_argument("--premium-budget", type=float)
     return parser
 
 
@@ -38,9 +45,10 @@ def _graph_dependencies():
     return TradingAgentsGraph, build_codex_oauth_config
 
 
-def _analyze_contracts(args, selection, graph_factory, config_factory) -> int:
+def _analyze_contracts(args, selection, graph_factory, config_factory, *, sizing_enabled):
     """Run the existing fresh-graph analysis loop for selected contracts."""
     failed = False
+    approved_candidates = []
     for rank, candidate in enumerate(selection.candidates[: args.analyze_top], 1):
         try:
             profile = classify_instrument(candidate.symbol)
@@ -56,17 +64,31 @@ def _analyze_contracts(args, selection, graph_factory, config_factory) -> int:
                 analysis_symbol=profile.analysis_symbol,
             )
             report_path = graph.save_reports(final_state, profile.canonical_symbol)
-            print(
+            result = (
                 f"rank: {rank} | symbol: {candidate.symbol} | selector score: "
                 f"{candidate.score:.2f} | decision: {decision} | report: {report_path}"
             )
+            if sizing_enabled:
+                approval = gate_long_option_purchase(
+                    decision,
+                    final_state.get("trader_investment_plan", ""),
+                )
+                if approval.approved:
+                    approved_candidates.append(candidate)
+                result += (
+                    f" | allocation gate: "
+                    f"{'APPROVED' if approval.approved else 'REJECTED'} | PM: "
+                    f"{approval.portfolio_rating or 'unparseable'} | trader: "
+                    f"{approval.trader_action or 'unparseable'}"
+                )
+            print(result)
         except Exception as exc:  # noqa: BLE001 - one contract must not abort the shortlist
             failed = True
             print(
                 f"rank: {rank} | symbol: {candidate.symbol} | selector score: "
                 f"{candidate.score:.2f} | failed: {exc}"
             )
-    return 1 if failed else 0
+    return (1 if failed else 0), approved_candidates
 
 
 def _auto_direction(args):
@@ -113,6 +135,21 @@ def _auto_direction(args):
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    sizing_enabled = any(
+        value is not None
+        for value in (args.account_equity, args.max_risk_pct, args.premium_budget)
+    )
+    if sizing_enabled:
+        try:
+            resolve_long_option_risk_budget(
+                account_equity=args.account_equity,
+                max_risk_pct=args.max_risk_pct,
+                premium_budget=args.premium_budget,
+            )
+        except ValueError as exc:
+            print(f"option sizing error: {exc}")
+            return 2
+
     graph_factory = config_factory = None
     if args.auto_direction:
         direction, selector_underlying, graph_factory, config_factory, rc = _auto_direction(args)
@@ -137,7 +174,33 @@ def main(argv: list[str] | None = None) -> int:
 
     if graph_factory is None or config_factory is None:
         graph_factory, config_factory = _graph_dependencies()
-    return _analyze_contracts(args, selection, graph_factory, config_factory)
+    analysis_rc, approved_candidates = _analyze_contracts(
+        args,
+        selection,
+        graph_factory,
+        config_factory,
+        sizing_enabled=sizing_enabled,
+    )
+    if not sizing_enabled:
+        return analysis_rc
+
+    if not approved_candidates:
+        print(
+            "NO OPTION POSITION: no analyzed contract had PM Buy/Overweight "
+            "AND Trader Buy."
+        )
+        return analysis_rc
+
+    allocation = allocate_long_option_premium_risk(
+        approved_candidates,
+        account_equity=args.account_equity,
+        max_risk_pct=args.max_risk_pct,
+        premium_budget=args.premium_budget,
+    )
+    print(allocation.report)
+    if allocation.available and not allocation.has_position:
+        print("NO OPTION POSITION: 0 whole contracts fit within the risk budget.")
+    return analysis_rc
 
 
 if __name__ == "__main__":

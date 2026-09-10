@@ -1,6 +1,10 @@
 import pytest
 
-from tradingagents.option_thesis_gate import gate_option_thesis, parse_trader_action
+from tradingagents.option_thesis_gate import (
+    gate_long_option_purchase,
+    gate_option_thesis,
+    parse_trader_action,
+)
 
 
 @pytest.mark.parametrize(
@@ -40,6 +44,69 @@ def test_final_transaction_label_has_priority_over_action_and_prose():
 
 def test_action_label_is_fallback_when_final_label_is_absent():
     assert parse_trader_action("**Action**: Sell\n\nReasoning: valuation") == "Sell"
+
+
+@pytest.mark.parametrize("portfolio", ["Buy", "Overweight"])
+def test_long_option_purchase_approves_bullish_pm_rating_and_trader_buy(portfolio):
+    result = gate_long_option_purchase(portfolio, "**Action**: Buy")
+
+    assert result.approved is True
+    assert result.portfolio_rating == portfolio
+    assert result.trader_action == "Buy"
+
+
+def test_long_put_purchase_is_direction_agnostic_at_gate():
+    plan = "Contract: long put\n**Action**: Buy"
+
+    result = gate_long_option_purchase("Buy", plan)
+
+    assert result.approved is True
+    assert result.trader_action == "Buy"
+
+
+@pytest.mark.parametrize(
+    ("portfolio", "action"),
+    [
+        ("Underweight", "Buy"),
+        ("Sell", "Buy"),
+        ("Buy", "Hold"),
+        ("REVIEW", "Buy"),
+    ],
+)
+def test_long_option_purchase_rejects_non_approving_consensus(portfolio, action):
+    result = gate_long_option_purchase(portfolio, f"**Action**: {action}")
+
+    assert result.approved is False
+    assert result.portfolio_rating == portfolio
+    assert result.trader_action == action
+
+
+def test_long_option_purchase_rejects_unparseable_pm_decision():
+    result = gate_long_option_purchase(
+        "The portfolio manager supplied no rating.",
+        "**Action**: Buy",
+    )
+
+    assert result.approved is False
+    assert result.portfolio_rating is None
+    assert result.trader_action == "Buy"
+
+
+def test_long_option_purchase_rejects_malformed_trader_text():
+    result = gate_long_option_purchase("Buy", "The trader would buy this contract.")
+
+    assert result.approved is False
+    assert result.portfolio_rating == "Buy"
+    assert result.trader_action is None
+
+
+def test_long_option_purchase_uses_strict_final_transaction_proposal_priority():
+    plan = "**Action**: Buy\nFINAL TRANSACTION PROPOSAL: **HOLD**"
+
+    assert parse_trader_action(plan) == "Hold"
+    result = gate_long_option_purchase("Buy", plan)
+    assert result.approved is False
+    assert result.trader_action == "Hold"
 
 
 @pytest.mark.parametrize(

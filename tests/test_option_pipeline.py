@@ -430,3 +430,319 @@ def test_direction_arguments_are_mutually_exclusive_and_required():
         parser.parse_args(["AAPL"])
     with pytest.raises(SystemExit):
         parser.parse_args(["AAPL", "--direction", "bullish", "--auto-direction"])
+
+
+def test_sizing_disabled_preserves_output_and_never_calls_allocator(capsys):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/legacy")
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult((candidate,), "LEGACY SELECTION"),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(module, "allocate_long_option_premium_risk") as allocator,
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(["AAPL", "--direction", "bullish"]) == 0
+
+    allocator.assert_not_called()
+    assert capsys.readouterr().out == (
+        "LEGACY SELECTION\n"
+        f"rank: 1 | symbol: {candidate.symbol} | selector score: 88.50 | "
+        "decision: Buy | report: /tmp/legacy\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "sizing_args",
+    [
+        ["--premium-budget", "0"],
+        ["--premium-budget", "nan"],
+        ["--account-equity", "10000"],
+        ["--max-risk-pct", "2"],
+        ["--account-equity", "10000", "--max-risk-pct", "101"],
+    ],
+)
+def test_invalid_sizing_is_rejected_before_selector_or_any_graph(sizing_args, capsys):
+    module = _load_pipeline()
+    with (
+        patch.object(module, "rank_equity_option_contracts") as selector,
+        patch.object(module, "_graph_dependencies") as dependencies,
+    ):
+        assert (
+            module.main(["AAPL", "--auto-direction", *sizing_args]) == 2
+        )
+
+    selector.assert_not_called()
+    dependencies.assert_not_called()
+    output = capsys.readouterr().out
+    assert output.startswith("option sizing error: ")
+    assert len(output.splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    ("symbol", "decision", "trader_plan", "approved"),
+    [
+        ("AAPL260918C00200000", "Rating: Buy", "Action: BUY", True),
+        (
+            "AAPL260918C00200000",
+            "Rating: Overweight",
+            "FINAL TRANSACTION PROPOSAL: BUY",
+            True,
+        ),
+        ("AAPL260918P00200000", "Buy", "Action: Buy", True),
+        ("AAPL260918C00200000", "Underweight", "Action: BUY", False),
+        ("AAPL260918C00200000", "Buy", "Action: HOLD", False),
+        ("AAPL260918C00200000", "REVIEW", "Action: BUY", False),
+        ("AAPL260918C00200000", "not parseable", "we should buy", False),
+    ],
+)
+def test_post_analysis_long_contract_approval_is_strict(
+    symbol, decision, trader_plan, approved, capsys
+):
+    module = _load_pipeline()
+    candidate = _candidate(symbol)
+    graph = _graph({"trader_investment_plan": trader_plan}, decision, "/tmp/option")
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult((candidate,), "SELECTION"),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(
+            module, "allocate_long_option_premium_risk", return_value=allocation
+        ) as allocator,
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            ["AAPL", "--direction", "bearish", "--premium-budget", "1000"]
+        ) == 0
+
+    if approved:
+        allocator.assert_called_once_with(
+            [candidate],
+            account_equity=None,
+            max_risk_pct=None,
+            premium_budget=1000.0,
+        )
+    else:
+        allocator.assert_not_called()
+    output = capsys.readouterr().out
+    expected_gate = "APPROVED" if approved else "REJECTED"
+    assert f"allocation gate: {expected_gate}" in output
+    assert ("ALLOCATION" in output) is approved
+
+
+def test_top_three_real_allocation_uses_equal_buckets_only_for_approved(capsys):
+    module = _load_pipeline()
+    candidates = (
+        _candidate("AAPL260918C00200000", score=99),
+        _candidate("AAPL260918C00205000", score=98),
+        _candidate("AAPL260918C00210000", score=1),
+    )
+    graphs = (
+        _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/one"),
+        _graph({"trader_investment_plan": "Action: HOLD"}, "Buy", "/tmp/two"),
+        _graph({"trader_investment_plan": "Action: BUY"}, "Overweight", "/tmp/three"),
+    )
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(candidates, "SELECTION"),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        _install_graph_module(MagicMock(side_effect=graphs)),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--analyze-top",
+                "3",
+                "--premium-budget",
+                "1200",
+            ]
+        ) == 0
+
+    output = capsys.readouterr().out
+    assert f"| 1 | {candidates[0].symbol} | $5.20 | $600.00 |" in output
+    assert f"| 2 | {candidates[2].symbol} | $5.20 | $600.00 |" in output
+    assert f"| 2 | {candidates[1].symbol}" not in output
+    assert "Selector score is intentionally not a sizing weight" in output
+
+
+def test_graph_failure_is_excluded_while_later_approval_is_allocated():
+    module = _load_pipeline()
+    failed_candidate = _candidate("AAPL260918C00200000")
+    approved_candidate = _candidate("AAPL260918C00205000")
+    failed_graph = MagicMock()
+    failed_graph.propagate.side_effect = RuntimeError("analysis failed")
+    approved_graph = _graph(
+        {"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/approved"
+    )
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult(
+                (failed_candidate, approved_candidate), "SELECTION"
+            ),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(
+            module, "allocate_long_option_premium_risk", return_value=allocation
+        ) as allocator,
+        _install_graph_module(MagicMock(side_effect=(failed_graph, approved_graph))),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--analyze-top",
+                "3",
+                "--premium-budget",
+                "1000",
+            ]
+        ) == 1
+
+    allocator.assert_called_once_with(
+        [approved_candidate],
+        account_equity=None,
+        max_risk_pct=None,
+        premium_budget=1000.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("sizing_args", "expected_kwargs"),
+    [
+        (
+            ["--premium-budget", "700"],
+            {"account_equity": None, "max_risk_pct": None, "premium_budget": 700.0},
+        ),
+        (
+            ["--account-equity", "50000", "--max-risk-pct", "2"],
+            {
+                "account_equity": 50000.0,
+                "max_risk_pct": 2.0,
+                "premium_budget": None,
+            },
+        ),
+        (
+            [
+                "--account-equity",
+                "50000",
+                "--max-risk-pct",
+                "2",
+                "--premium-budget",
+                "600",
+            ],
+            {
+                "account_equity": 50000.0,
+                "max_risk_pct": 2.0,
+                "premium_budget": 600.0,
+            },
+        ),
+    ],
+)
+def test_valid_budget_forms_reach_allocator(sizing_args, expected_kwargs):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    allocation = SimpleNamespace(report="ALLOCATION", available=True, has_position=True)
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult((candidate,), "SELECTION"),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        patch.object(
+            module, "allocate_long_option_premium_risk", return_value=allocation
+        ) as allocator,
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            ["AAPL", "--direction", "bullish", *sizing_args]
+        ) == 0
+
+    allocator.assert_called_once_with([candidate], **expected_kwargs)
+
+
+def test_both_caps_use_smaller_budget_with_real_allocator(capsys):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult((candidate,), "SELECTION"),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            [
+                "AAPL",
+                "--direction",
+                "bullish",
+                "--account-equity",
+                "50000",
+                "--max-risk-pct",
+                "2",
+                "--premium-budget",
+                "600",
+            ]
+        ) == 0
+
+    assert "Risk budget: $600.00" in capsys.readouterr().out
+
+
+def test_unaffordable_approved_contract_is_valid_zero_position(capsys):
+    module = _load_pipeline()
+    candidate = _candidate("AAPL260918C00200000")
+    graph = _graph({"trader_investment_plan": "Action: BUY"}, "Buy", "/tmp/report")
+    with (
+        patch.object(
+            module,
+            "rank_equity_option_contracts",
+            return_value=OptionSelectionResult((candidate,), "SELECTION"),
+        ),
+        patch.object(module, "classify_instrument", side_effect=_profile),
+        _install_graph_module(MagicMock(return_value=graph)),
+    ):
+        assert module.main(
+            ["AAPL", "--direction", "bullish", "--premium-budget", "100"]
+        ) == 0
+
+    output = capsys.readouterr().out
+    assert f"| 1 | {candidate.symbol} | $5.20 | $100.00 | 0 |" in output
+    assert "NO OPTION POSITION: 0 whole contracts fit" in output
+
+
+def test_sized_auto_no_option_trade_stops_before_selector_and_allocator():
+    module = _load_pipeline()
+    state = {"trader_investment_plan": "Action: HOLD"}
+    graph_factory = MagicMock(return_value=_graph(state, "Hold", "/tmp/no-trade"))
+    with (
+        patch.object(module, "_graph_dependencies", return_value=(graph_factory, MagicMock())),
+        patch.object(module, "classify_instrument", return_value=_underlying_profile()),
+        patch.object(module, "rank_equity_option_contracts") as selector,
+        patch.object(module, "allocate_long_option_premium_risk") as allocator,
+    ):
+        assert module.main(
+            ["AAPL", "--auto-direction", "--premium-budget", "1000"]
+        ) == 0
+
+    selector.assert_not_called()
+    allocator.assert_not_called()
