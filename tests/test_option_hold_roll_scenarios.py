@@ -283,6 +283,60 @@ def test_short_dte_deduplicates_horizons_instead_of_scenario_after_old_expiry():
     assert len(result.points) == 18
 
 
+def test_prior_roll_lifecycle_basis_drives_hold_and_next_roll_scenario_pnl():
+    snapshot = _snapshot(bid=10.0)
+    candidate = _candidate(
+        close_credit_per_share=10.0,
+        open_debit_per_share=12.0,
+    )
+    result = compare_hold_vs_roll_scenarios(
+        snapshot,
+        _plan(candidate),
+        entry_premium=15.0,
+        lifecycle_net_premium_per_share=12.25,
+        contracts=1,
+        risk_free_rate=0.04,
+    )
+    point = _point(result, horizon=3, spot_shock=0.0, iv_shock=0.0)
+
+    expected_hold = (point.hold_model_value_per_share - 12.25) * 100
+    expected_roll = (
+        (10.0 - 12.25)
+        + (point.alternatives[0].model_value_per_share - 12.0)
+    ) * 100
+    assert point.hold_lifecycle_pnl_dollars == pytest.approx(expected_hold)
+    assert point.alternatives[0].lifecycle_pnl_dollars == pytest.approx(expected_roll)
+    assert "Current-leg entry premium: $15.00" in result.report
+    assert "Lifecycle net premium basis: $12.25" in result.report
+
+
+def test_scenario_lifecycle_basis_can_be_negative_after_prior_net_credits():
+    result = compare_hold_vs_roll_scenarios(
+        _snapshot(),
+        _plan(_candidate()),
+        entry_premium=15.0,
+        lifecycle_net_premium_per_share=-2.0,
+        contracts=1,
+        risk_free_rate=0.04,
+    )
+    point = _point(result, horizon=3, spot_shock=0.0, iv_shock=0.0)
+    assert point.hold_lifecycle_pnl_dollars == pytest.approx(
+        (point.hold_model_value_per_share + 2.0) * 100
+    )
+
+
+def test_nonfinite_scenario_lifecycle_basis_is_rejected():
+    with pytest.raises(ValueError, match="lifecycle_net_premium_per_share"):
+        compare_hold_vs_roll_scenarios(
+            _snapshot(),
+            _plan(_candidate()),
+            entry_premium=8.0,
+            lifecycle_net_premium_per_share=float("inf"),
+            contracts=1,
+            risk_free_rate=0.04,
+        )
+
+
 def test_rate_resolver_is_called_once_when_rate_not_supplied(monkeypatch):
     calls = []
 

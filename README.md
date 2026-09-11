@@ -274,6 +274,40 @@ ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
 ```
 
+### Option position registry and trade journal
+
+Long US equity-option positions can be persisted separately from LangGraph checkpoints. The default registry is `~/.tradingagents/positions/options.sqlite3`; override it with `TRADINGAGENTS_OPTION_REGISTRY_DB` or `--db`. The registry keeps a mutable current-position projection plus an append-only SQLite event journal.
+
+Record actual execution facts explicitly:
+
+```bash
+# Opening fill
+.venv/bin/python scripts/options_registry.py open AAPL260925C00320000 \
+  --entry-premium 8.25 --contracts 2 --entry-date 2026-09-11 \
+  --take-profit-pct 50 --stop-loss-pct 40 --thesis-direction bullish
+
+# Later actual roll fill: old leg sold at 11, replacement bought at 15
+.venv/bin/python scripts/options_registry.py roll AAPL \
+  --new-symbol AAPL261016C00320000 \
+  --close-credit 11 --new-entry-premium 15 --date 2026-09-20
+
+# Actual close fill
+.venv/bin/python scripts/options_registry.py close AAPL \
+  --close-premium 17 --date 2026-10-10
+```
+
+After a roll, the registry deliberately keeps three distinct values: the immutable original entry premium, the current-leg entry premium, and cumulative lifecycle net premium. This prevents prior realized roll cashflows from disappearing from lifecycle breakeven and scenario analysis.
+
+A registered open position can be managed without retyping its current OCC symbol, contracts, cost basis, or stored exit policy:
+
+```bash
+.venv/bin/python scripts/manage_options.py AAPL --resolve-only
+.venv/bin/python scripts/manage_options.py AAPL
+.venv/bin/python scripts/manage_options.py AAPL --refresh-thesis --plan-roll
+```
+
+Underlying lookup fails closed when multiple open positions match; use the position ID in that case. Analysis and roll planning never record an execution event automatically. Only explicit `options_registry.py open`, `roll`, or `close` commands record trade fills. Stored Greek limits remain part of the auditable journal in v1.8, but the existing-position manager does not silently re-enforce them.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.

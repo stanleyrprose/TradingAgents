@@ -242,6 +242,62 @@ def test_missing_bid_keeps_hold_forward_metrics_unavailable_but_lifecycle_compar
     assert result.status == "COMPARE"
 
 
+def test_prior_roll_lifecycle_basis_is_not_replaced_by_current_leg_entry_cost():
+    result = compare_hold_vs_roll(
+        _snapshot(strike=320.0, bid=16.0),
+        _plan(
+            _roll_candidate(
+                strike=320.0,
+                close_credit_per_share=16.0,
+                open_debit_per_share=18.0,
+                net_debit_per_share=2.0,
+                net_cash_outflow=400.0,
+            )
+        ),
+        entry_premium=15.0,
+        lifecycle_net_premium_per_share=12.25,
+        contracts=2,
+    )
+
+    assert result.hold is not None
+    assert result.hold.lifecycle_breakeven == pytest.approx(332.25)
+    assert result.alternatives[0].lifecycle_net_premium_per_share == pytest.approx(14.25)
+    assert result.alternatives[0].lifecycle_breakeven == pytest.approx(334.25)
+    assert "Current-leg entry premium: $15.00" in result.report
+    assert "Lifecycle net premium basis: $12.25" in result.report
+
+
+def test_lifecycle_basis_can_be_zero_or_negative_after_net_credit_rolls():
+    zero = compare_hold_vs_roll(
+        _snapshot(strike=320.0),
+        _plan(_roll_candidate(strike=320.0)),
+        entry_premium=15.0,
+        lifecycle_net_premium_per_share=0.0,
+        contracts=1,
+    )
+    credit = compare_hold_vs_roll(
+        _snapshot(strike=320.0),
+        _plan(_roll_candidate(strike=320.0)),
+        entry_premium=15.0,
+        lifecycle_net_premium_per_share=-2.0,
+        contracts=1,
+    )
+
+    assert zero.hold is not None and zero.hold.lifecycle_breakeven == pytest.approx(320.0)
+    assert credit.hold is not None and credit.hold.lifecycle_breakeven == pytest.approx(318.0)
+
+
+def test_nonfinite_lifecycle_basis_is_rejected():
+    with pytest.raises(ValueError, match="lifecycle_net_premium_per_share"):
+        compare_hold_vs_roll(
+            _snapshot(),
+            _plan(_roll_candidate()),
+            entry_premium=8.25,
+            lifecycle_net_premium_per_share=float("nan"),
+            contracts=2,
+        )
+
+
 def test_report_explicitly_refuses_automatic_hold_or_roll_label():
     result = compare_hold_vs_roll(
         _snapshot(),

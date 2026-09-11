@@ -131,13 +131,14 @@ def _render(
     alternatives: tuple[HoldRollAlternative, ...],
     *,
     entry_premium: float,
+    lifecycle_basis: float,
     contracts: int,
 ) -> str:
     lines = [
         "# Hold vs roll decision comparison",
         "",
         "Status: **COMPARE**",
-        f"Current contract: {snapshot.symbol} | Contracts: {contracts} | Entry premium: ${entry_premium:.2f}",
+        f"Current contract: {snapshot.symbol} | Contracts: {contracts} | Current-leg entry premium: ${entry_premium:.2f} | Lifecycle net premium basis: ${lifecycle_basis:.2f}",
         "This is a deterministic trade-off comparison, not a recommendation or order.",
         "",
         "## Same-scale comparison",
@@ -171,18 +172,18 @@ def _render(
             "",
             "## Breakeven semantics",
             "",
-            f"HOLD lifecycle breakeven uses the original entry premium: {hold.lifecycle_breakeven:.2f}.",
+            f"HOLD lifecycle breakeven uses the cumulative lifecycle net premium basis: {hold.lifecycle_breakeven:.2f}.",
             (
                 "HOLD forward-opportunity breakeven, using the current delayed bid as the value you give up by not selling now: "
                 f"{_fmt(hold.forward_opportunity_breakeven)}."
             ),
-            "Each ROLL lifecycle breakeven uses cumulative net premium = original entry premium - old delayed bid + new delayed ask, then applies that premium to the replacement strike.",
+            "Each ROLL lifecycle breakeven uses cumulative net premium = current lifecycle basis - old delayed bid + new delayed ask, then applies that premium to the replacement strike.",
             "A lower lifecycle breakeven is directionally easier for a call; a higher lifecycle breakeven is directionally easier for a put.",
             "",
             "## Important distinction",
             "",
             "Additional cash outflow is the roll transaction cash difference. New gross premium-at-risk is the replacement option ask × 100 × contracts and is the amount the new long option can lose from its own purchase price. They are not interchangeable.",
-            "The HOLD row uses current delayed liquidation value as forward capital at risk; original premium is a sunk historical cost and is shown only through lifecycle breakeven / original trade economics.",
+            "The HOLD row uses current delayed liquidation value as forward capital at risk. Current-leg purchase cost is sunk historical cost for the forward decision, while prior realized roll cashflows remain embedded in the lifecycle net premium basis rather than being erased.",
             "",
             "## Decision boundary",
             "",
@@ -198,10 +199,18 @@ def compare_hold_vs_roll(
     *,
     entry_premium: object,
     contracts: object,
+    lifecycle_net_premium_per_share: object | None = None,
 ) -> HoldRollDecisionResult:
-    """Compare continuing to hold with already-planned roll candidates."""
+    """Compare HOLD with rolls, preserving cumulative lifecycle cost when supplied."""
 
     premium = _positive(entry_premium, "entry_premium")
+    lifecycle_basis = (
+        premium
+        if lifecycle_net_premium_per_share is None
+        else _finite(lifecycle_net_premium_per_share)
+    )
+    if lifecycle_basis is None:
+        raise ValueError("lifecycle_net_premium_per_share must be a finite number")
     if isinstance(contracts, bool) or not isinstance(contracts, int) or contracts <= 0:
         raise ValueError("contracts must be a positive whole number")
 
@@ -213,7 +222,7 @@ def compare_hold_vs_roll(
     bid = _finite(snapshot.bid)
     delta = _finite(snapshot.delta)
     theta = _finite(snapshot.theta)
-    hold_be = _lifecycle_breakeven(snapshot.right, snapshot.strike, premium)
+    hold_be = _lifecycle_breakeven(snapshot.right, snapshot.strike, lifecycle_basis)
     forward_be = None if bid is None else _lifecycle_breakeven(snapshot.right, snapshot.strike, bid)
     hold = HoldBaseline(
         symbol=snapshot.symbol,
@@ -229,7 +238,9 @@ def compare_hold_vs_roll(
 
     alternatives: list[HoldRollAlternative] = []
     for item in roll_plan.candidates:
-        lifecycle_net_premium = premium - item.close_credit_per_share + item.open_debit_per_share
+        lifecycle_net_premium = (
+            lifecycle_basis - item.close_credit_per_share + item.open_debit_per_share
+        )
         lifecycle_be = _lifecycle_breakeven(snapshot.right, item.strike, lifecycle_net_premium)
         be_improvement = _breakeven_improvement(snapshot.right, hold_be, lifecycle_be)
         theta_relief = (
@@ -266,5 +277,12 @@ def compare_hold_vs_roll(
         "hold baseline and roll candidates are expressed on consistent lifecycle economics",
         hold,
         result_alternatives,
-        _render(snapshot, hold, result_alternatives, entry_premium=premium, contracts=contracts),
+        _render(
+            snapshot,
+            hold,
+            result_alternatives,
+            entry_premium=premium,
+            lifecycle_basis=lifecycle_basis,
+            contracts=contracts,
+        ),
     )

@@ -119,6 +119,7 @@ def _render(
     *,
     contracts: int,
     entry_premium: float,
+    lifecycle_basis: float,
     rate: float,
     provenance: str,
     horizons: tuple[int, ...],
@@ -130,7 +131,7 @@ def _render(
         "# Scenario-normalized hold vs roll comparison",
         "",
         "Status: **COMPARE**",
-        f"Current contract: {snapshot.symbol} | Contracts: {contracts} | Original entry premium: ${entry_premium:.2f}",
+        f"Current contract: {snapshot.symbol} | Contracts: {contracts} | Current-leg entry premium: ${entry_premium:.2f} | Lifecycle net premium basis: ${lifecycle_basis:.2f}",
         f"Underlying spot baseline: ${snapshot.underlying_spot:.2f} | Old DTE: {snapshot.dte}",
         f"Risk-free-rate proxy: {rate:.2%} ({provenance}); q=0.00%.",
         f"Horizons: {', '.join(f'+{day}d' for day in horizons)} | Spot shocks: -5%, 0%, +5% | IV shocks: -5pp, 0pp, +5pp.",
@@ -139,8 +140,8 @@ def _render(
         "",
         "## Lifecycle P/L semantics",
         "",
-        "HOLD lifecycle P/L = future old-option model value - original entry premium.",
-        "ROLL lifecycle P/L = (old delayed bid - original entry premium) + (future replacement model value - replacement delayed ask).",
+        "HOLD lifecycle P/L = future old-option model value - cumulative lifecycle net premium basis.",
+        "ROLL lifecycle P/L = (old delayed bid - cumulative lifecycle basis) + (future replacement model value - replacement delayed ask).",
         "ROLL advantage vs HOLD is the difference between those two lifecycle P/L values under the exact same scenario.",
         "",
         "## Grid summary",
@@ -210,12 +211,20 @@ def compare_hold_vs_roll_scenarios(
     *,
     entry_premium: object,
     contracts: object,
+    lifecycle_net_premium_per_share: object | None = None,
     risk_free_rate: object | None = None,
     risk_free_provenance: str | None = None,
 ) -> HoldRollScenarioResult:
-    """Compare HOLD and roll candidates over the same deterministic scenario grid."""
+    """Compare HOLD and rolls on one grid, preserving cumulative lifecycle cost."""
 
     premium = _positive(entry_premium, "entry_premium")
+    lifecycle_basis = (
+        premium
+        if lifecycle_net_premium_per_share is None
+        else _finite(lifecycle_net_premium_per_share)
+    )
+    if lifecycle_basis is None:
+        raise ValueError("lifecycle_net_premium_per_share must be a finite number")
     if isinstance(contracts, bool) or not isinstance(contracts, int) or contracts <= 0:
         raise ValueError("contracts must be a positive whole number")
     if roll_plan.status != "COMPARE" or not roll_plan.candidates:
@@ -289,7 +298,7 @@ def compare_hold_vs_roll_scenarios(
                     snapshot.right,
                     0.0,
                 )
-                hold_lifecycle_pnl = (hold_value - premium) * scale
+                hold_lifecycle_pnl = (hold_value - lifecycle_basis) * scale
                 hold_forward_pnl = (hold_value - bid) * scale
                 roll_outcomes: list[RollScenarioAlternative] = []
                 for candidate in roll_plan.candidates:
@@ -305,7 +314,7 @@ def compare_hold_vs_roll_scenarios(
                         0.0,
                     )
                     lifecycle_pnl = (
-                        (candidate.close_credit_per_share - premium)
+                        (candidate.close_credit_per_share - lifecycle_basis)
                         + (new_value - candidate.open_debit_per_share)
                     ) * scale
                     advantage = lifecycle_pnl - hold_lifecycle_pnl
@@ -365,6 +374,7 @@ def compare_hold_vs_roll_scenarios(
             snapshot,
             contracts=contracts,
             entry_premium=premium,
+            lifecycle_basis=lifecycle_basis,
             rate=rate,
             provenance=provenance,
             horizons=horizons,

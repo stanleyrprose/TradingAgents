@@ -606,17 +606,106 @@ def test_plan_roll_confirmed_refresh_calls_selector_with_current_delta_and_later
         compare,
         entry_premium=5.0,
         contracts=2,
+        lifecycle_net_premium_per_share=None,
     )
     scenarios.assert_called_once_with(
         snapshot,
         compare,
         entry_premium=5.0,
         contracts=2,
+        lifecycle_net_premium_per_share=None,
     )
     output = capsys.readouterr().out
     assert "ROLL COMPARE" in output
     assert "HOLD VS ROLL" in output
     assert "SCENARIO GRID" in output
+
+
+def test_nonfinite_lifecycle_basis_fails_before_snapshot_fetch(capsys):
+    module = _load_script()
+    with patch.object(module, "fetch_equity_option_snapshot") as fetch:
+        rc = module.main(
+            [
+                "AAPL260918C00300000",
+                "--entry-premium",
+                "5",
+                "--lifecycle-net-premium",
+                "nan",
+                "--contracts",
+                "1",
+            ]
+        )
+
+    assert rc == 2
+    fetch.assert_not_called()
+    assert "lifecycle_net_premium must be a finite number" in capsys.readouterr().out
+
+
+def test_plan_roll_passes_explicit_lifecycle_basis_to_both_comparisons():
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+    selection = SimpleNamespace(available=True)
+    compare = SimpleNamespace(status="COMPARE", report="ROLL COMPARE")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ),
+        patch.object(module, "rank_equity_option_contracts", return_value=selection),
+        patch.object(module, "plan_long_option_roll", return_value=compare),
+        patch.object(
+            module,
+            "compare_hold_vs_roll",
+            return_value=SimpleNamespace(report="HOLD VS ROLL"),
+        ) as hold_roll,
+        patch.object(
+            module,
+            "compare_hold_vs_roll_scenarios",
+            return_value=SimpleNamespace(status="COMPARE", report="SCENARIO GRID"),
+        ) as scenarios,
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "15",
+                "--lifecycle-net-premium",
+                "12.25",
+                "--contracts",
+                "2",
+                "--date",
+                "2026-09-10",
+                "--plan-roll",
+            ]
+        )
+
+    assert rc == 0
+    hold_roll.assert_called_once_with(
+        snapshot,
+        compare,
+        entry_premium=15.0,
+        contracts=2,
+        lifecycle_net_premium_per_share=12.25,
+    )
+    scenarios.assert_called_once_with(
+        snapshot,
+        compare,
+        entry_premium=15.0,
+        contracts=2,
+        lifecycle_net_premium_per_share=12.25,
+    )
 
 
 def test_plan_roll_explicit_tuning_overrides_default_selector_targets():

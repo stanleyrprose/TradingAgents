@@ -25,6 +25,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("symbol", help="exact OCC equity-option symbol")
     parser.add_argument("--entry-premium", type=float, required=True)
+    parser.add_argument(
+        "--lifecycle-net-premium",
+        type=float,
+        help="cumulative lifecycle net premium/share after prior rolls; defaults to current-leg entry premium",
+    )
     parser.add_argument("--contracts", type=int, required=True)
     parser.add_argument("--date", default=date.today().isoformat(), help="YYYY-MM-DD (today only)")
     parser.add_argument("--take-profit-pct", type=float)
@@ -194,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
             entry_premium=args.entry_premium,
             contracts=args.contracts,
         )
+        lifecycle_net_premium = args.lifecycle_net_premium
+        if lifecycle_net_premium is not None and not math.isfinite(lifecycle_net_premium):
+            raise ValueError("lifecycle_net_premium must be a finite number")
         policy = resolve_option_exit_policy(
             take_profit_pct=args.take_profit_pct,
             stop_loss_pct=args.stop_loss_pct,
@@ -265,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
                 roll_plan,
                 entry_premium=entry_premium,
                 contracts=contracts,
+                lifecycle_net_premium_per_share=lifecycle_net_premium,
             )
             print()
             print(hold_roll.report)
@@ -274,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
                     roll_plan,
                     entry_premium=entry_premium,
                     contracts=contracts,
+                    lifecycle_net_premium_per_share=lifecycle_net_premium,
                 )
             except ValueError as exc:
                 print(f"<scenario-normalized hold-vs-roll unavailable: {exc}>")
