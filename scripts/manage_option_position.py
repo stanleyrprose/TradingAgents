@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import math
 from datetime import date
 
 from tradingagents.dataflows.equity_options import fetch_equity_option_snapshot
+from tradingagents.dataflows.option_selector import rank_equity_option_contracts
 from tradingagents.instrument_router import classify_instrument
 from tradingagents.option_position_manager import (
     evaluate_long_option_position,
     resolve_long_option_position_inputs,
     resolve_option_exit_policy,
 )
+from tradingagents.option_roll_planner import plan_long_option_roll
 from tradingagents.option_thesis_gate import refresh_long_option_thesis
 
 
@@ -36,6 +39,15 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="explicitly treat opposite refreshed consensus as EXIT; implies --refresh-thesis",
     )
+    parser.add_argument(
+        "--plan-roll",
+        action="store_true",
+        help="compare same-direction later-expiry replacements; implies --refresh-thesis",
+    )
+    parser.add_argument("--roll-top", type=int)
+    parser.add_argument("--roll-min-dte", type=int)
+    parser.add_argument("--roll-max-dte", type=int)
+    parser.add_argument("--roll-target-delta", type=float)
     return parser
 
 
@@ -104,6 +116,74 @@ def _final_status(position_status: str, refresh_status: str | None, *, exit_on_i
     return position_status
 
 
+def _validate_roll_args(args) -> None:
+    supplied = any(
+        value is not None
+        for value in (
+            args.roll_top,
+            args.roll_min_dte,
+            args.roll_max_dte,
+            args.roll_target_delta,
+        )
+    )
+    if supplied and not args.plan_roll:
+        raise ValueError("roll tuning arguments require --plan-roll")
+    if not args.plan_roll:
+        return
+    if args.roll_top is not None and not 1 <= args.roll_top <= 20:
+        raise ValueError("roll_top must be between 1 and 20")
+    for name, value in (
+        ("roll_min_dte", args.roll_min_dte),
+        ("roll_max_dte", args.roll_max_dte),
+    ):
+        if value is not None and not 1 <= value <= 365:
+            raise ValueError(f"{name} must be between 1 and 365")
+    if (
+        args.roll_min_dte is not None
+        and args.roll_max_dte is not None
+        and args.roll_min_dte > args.roll_max_dte
+    ):
+        raise ValueError("roll_min_dte cannot exceed roll_max_dte")
+    if args.roll_target_delta is not None and (
+        not math.isfinite(args.roll_target_delta)
+        or not 0.10 <= args.roll_target_delta <= 0.90
+    ):
+        raise ValueError("roll_target_delta must be between 0.10 and 0.90")
+
+
+def _rank_roll_candidates(snapshot, refresh, args):
+    if refresh.status != "CONFIRMED":
+        return None
+    target_delta = args.roll_target_delta
+    if target_delta is None:
+        current_delta = snapshot.delta
+        if (
+            current_delta is None
+            or not math.isfinite(float(current_delta))
+            or not 0.10 <= abs(float(current_delta)) <= 0.90
+        ):
+            raise ValueError(
+                "current option delta is unavailable/outside selector bounds; "
+                "provide --roll-target-delta"
+            )
+        target_delta = abs(float(current_delta))
+    min_dte = max(snapshot.dte + 1, args.roll_min_dte or 1, 1)
+    max_dte = args.roll_max_dte or 365
+    if min_dte > max_dte:
+        raise ValueError(
+            f"no allowed later-expiry DTE range: minimum {min_dte} exceeds maximum {max_dte}"
+        )
+    return rank_equity_option_contracts(
+        snapshot.underlying,
+        refresh.option_direction,
+        args.date,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        target_delta=target_delta,
+        top_n=args.roll_top or 3,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
 
@@ -118,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             exit_at_dte=args.exit_at_dte,
             max_theta_burn_pct_per_day=args.max_theta_burn_pct_per_day,
         )
+        _validate_roll_args(args)
     except ValueError as exc:
         print(f"option position policy error: {exc}")
         return 2
@@ -137,8 +218,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(result.report)
 
+    refresh = None
     refresh_status = None
-    refresh_requested = args.refresh_thesis or args.exit_on_thesis_invalidation
+    refresh_requested = (
+        args.refresh_thesis or args.exit_on_thesis_invalidation or args.plan_roll
+    )
     if refresh_requested:
         try:
             refresh, report_path = _refresh_underlying_thesis(snapshot, args.date)
@@ -154,6 +238,25 @@ def main(argv: list[str] | None = None) -> int:
                 exit_on_invalidation=args.exit_on_thesis_invalidation,
             )
         )
+
+    if args.plan_roll:
+        assert refresh is not None
+        try:
+            selection = _rank_roll_candidates(snapshot, refresh, args)
+            roll_plan = plan_long_option_roll(
+                snapshot,
+                refresh,
+                contracts=contracts,
+                selection=selection,
+                top_n=args.roll_top or 3,
+            )
+        except ValueError as exc:
+            print(f"<option roll planning unavailable: {exc}>")
+            return 2
+        print()
+        print(roll_plan.report)
+        if roll_plan.status == "REVIEW":
+            return 2
 
     final_status = _final_status(
         result.status,

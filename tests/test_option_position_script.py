@@ -458,3 +458,254 @@ def test_final_status_only_uses_explicit_opposite_thesis_policy(
     assert _load_script()._final_status(
         base, refresh, exit_on_invalidation=exit_policy
     ) == expected
+
+
+def test_roll_tuning_args_require_plan_roll_before_snapshot_fetch(capsys):
+    module = _load_script()
+    with patch.object(module, "fetch_equity_option_snapshot") as fetch:
+        rc = module.main(
+            [
+                "AAPL260918C00300000",
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--roll-target-delta",
+                "0.55",
+            ]
+        )
+
+    assert rc == 2
+    fetch.assert_not_called()
+    assert "roll tuning arguments require --plan-roll" in capsys.readouterr().out
+
+
+def test_plan_roll_neutral_refresh_never_calls_selector(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("NEUTRAL", current_direction=None)
+    no_roll = SimpleNamespace(status="NO_ROLL", report="ROLL NO_ROLL")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ) as refresh_call,
+        patch.object(module, "rank_equity_option_contracts") as selector,
+        patch.object(module, "plan_long_option_roll", return_value=no_roll) as planner,
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--date",
+                "2026-09-10",
+                "--plan-roll",
+            ]
+        )
+
+    assert rc == 0
+    refresh_call.assert_called_once_with(snapshot, "2026-09-10")
+    selector.assert_not_called()
+    planner.assert_called_once_with(
+        snapshot,
+        refresh,
+        contracts=1,
+        selection=None,
+        top_n=3,
+    )
+    assert "ROLL NO_ROLL" in capsys.readouterr().out
+
+
+def test_plan_roll_confirmed_refresh_calls_selector_with_current_delta_and_later_dte(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+    selection = SimpleNamespace(available=True)
+    compare = SimpleNamespace(status="COMPARE", report="ROLL COMPARE")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ),
+        patch.object(
+            module, "rank_equity_option_contracts", return_value=selection
+        ) as selector,
+        patch.object(module, "plan_long_option_roll", return_value=compare) as planner,
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "2",
+                "--date",
+                "2026-09-10",
+                "--plan-roll",
+            ]
+        )
+
+    assert rc == 0
+    selector.assert_called_once_with(
+        "AAPL",
+        "bullish",
+        "2026-09-10",
+        min_dte=snapshot.dte + 1,
+        max_dte=365,
+        target_delta=abs(snapshot.delta),
+        top_n=3,
+    )
+    planner.assert_called_once_with(
+        snapshot,
+        refresh,
+        contracts=2,
+        selection=selection,
+        top_n=3,
+    )
+    assert "ROLL COMPARE" in capsys.readouterr().out
+
+
+def test_plan_roll_explicit_tuning_overrides_default_selector_targets():
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+    args = module._parser().parse_args(
+        [
+            snapshot.symbol,
+            "--entry-premium",
+            "5",
+            "--contracts",
+            "1",
+            "--date",
+            "2026-09-10",
+            "--plan-roll",
+            "--roll-min-dte",
+            "30",
+            "--roll-max-dte",
+            "90",
+            "--roll-target-delta",
+            "0.50",
+            "--roll-top",
+            "5",
+        ]
+    )
+    with patch.object(module, "rank_equity_option_contracts") as selector:
+        module._rank_roll_candidates(snapshot, refresh, args)
+
+    selector.assert_called_once_with(
+        "AAPL",
+        "bullish",
+        "2026-09-10",
+        min_dte=30,
+        max_dte=90,
+        target_delta=0.50,
+        top_n=5,
+    )
+
+
+def test_plan_roll_invalidated_refresh_never_calls_selector():
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("INVALIDATED", current_direction="bearish")
+    args = module._parser().parse_args(
+        [
+            snapshot.symbol,
+            "--entry-premium",
+            "5",
+            "--contracts",
+            "1",
+            "--plan-roll",
+        ]
+    )
+    with patch.object(module, "rank_equity_option_contracts") as selector:
+        assert module._rank_roll_candidates(snapshot, refresh, args) is None
+
+    selector.assert_not_called()
+
+
+def test_plan_roll_missing_current_delta_requires_explicit_target_before_selector():
+    module = _load_script()
+    snapshot = _snapshot()
+    snapshot = snapshot.__class__(**{**snapshot.__dict__, "delta": None})
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+    args = module._parser().parse_args(
+        [
+            snapshot.symbol,
+            "--entry-premium",
+            "5",
+            "--contracts",
+            "1",
+            "--plan-roll",
+        ]
+    )
+    with (
+        patch.object(module, "rank_equity_option_contracts") as selector,
+        pytest.raises(ValueError, match="provide --roll-target-delta"),
+    ):
+        module._rank_roll_candidates(snapshot, refresh, args)
+
+    selector.assert_not_called()
+
+
+def test_roll_review_returns_two_for_fail_closed_automation():
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+    selection = SimpleNamespace(available=True)
+    review = SimpleNamespace(status="REVIEW", report="ROLL REVIEW")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ),
+        patch.object(module, "rank_equity_option_contracts", return_value=selection),
+        patch.object(module, "plan_long_option_roll", return_value=review),
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--plan-roll",
+            ]
+        )
+
+    assert rc == 2
