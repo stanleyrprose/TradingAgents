@@ -504,6 +504,7 @@ def test_plan_roll_neutral_refresh_never_calls_selector(capsys):
         patch.object(module, "rank_equity_option_contracts") as selector,
         patch.object(module, "plan_long_option_roll", return_value=no_roll) as planner,
         patch.object(module, "compare_hold_vs_roll") as hold_roll,
+        patch.object(module, "compare_hold_vs_roll_scenarios") as scenarios,
     ):
         rc = module.main(
             [
@@ -529,6 +530,7 @@ def test_plan_roll_neutral_refresh_never_calls_selector(capsys):
         top_n=3,
     )
     hold_roll.assert_not_called()
+    scenarios.assert_not_called()
     assert "ROLL NO_ROLL" in capsys.readouterr().out
 
 
@@ -563,6 +565,11 @@ def test_plan_roll_confirmed_refresh_calls_selector_with_current_delta_and_later
             "compare_hold_vs_roll",
             return_value=SimpleNamespace(report="HOLD VS ROLL"),
         ) as hold_roll,
+        patch.object(
+            module,
+            "compare_hold_vs_roll_scenarios",
+            return_value=SimpleNamespace(status="COMPARE", report="SCENARIO GRID"),
+        ) as scenarios,
     ):
         rc = module.main(
             [
@@ -600,9 +607,16 @@ def test_plan_roll_confirmed_refresh_calls_selector_with_current_delta_and_later
         entry_premium=5.0,
         contracts=2,
     )
+    scenarios.assert_called_once_with(
+        snapshot,
+        compare,
+        entry_premium=5.0,
+        contracts=2,
+    )
     output = capsys.readouterr().out
     assert "ROLL COMPARE" in output
     assert "HOLD VS ROLL" in output
+    assert "SCENARIO GRID" in output
 
 
 def test_plan_roll_explicit_tuning_overrides_default_selector_targets():
@@ -711,6 +725,8 @@ def test_roll_review_returns_two_for_fail_closed_automation():
         ),
         patch.object(module, "rank_equity_option_contracts", return_value=selection),
         patch.object(module, "plan_long_option_roll", return_value=review),
+        patch.object(module, "compare_hold_vs_roll") as hold_roll,
+        patch.object(module, "compare_hold_vs_roll_scenarios") as scenarios,
     ):
         rc = module.main(
             [
@@ -724,3 +740,109 @@ def test_roll_review_returns_two_for_fail_closed_automation():
         )
 
     assert rc == 2
+    hold_roll.assert_not_called()
+    scenarios.assert_not_called()
+
+
+def test_scenario_no_compare_returns_two_for_fail_closed_automation(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+    selection = SimpleNamespace(available=True)
+    compare = SimpleNamespace(status="COMPARE", report="ROLL COMPARE")
+    scenario_result = SimpleNamespace(status="NO_COMPARE", report="SCENARIO UNAVAILABLE")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ),
+        patch.object(module, "rank_equity_option_contracts", return_value=selection),
+        patch.object(module, "plan_long_option_roll", return_value=compare),
+        patch.object(
+            module,
+            "compare_hold_vs_roll",
+            return_value=SimpleNamespace(report="HOLD VS ROLL"),
+        ),
+        patch.object(
+            module,
+            "compare_hold_vs_roll_scenarios",
+            return_value=scenario_result,
+        ),
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--plan-roll",
+            ]
+        )
+
+    assert rc == 2
+    assert "SCENARIO UNAVAILABLE" in capsys.readouterr().out
+
+
+def test_scenario_value_error_returns_two_without_crashing(capsys):
+    module = _load_script()
+    snapshot = _snapshot()
+    refresh = _refresh_result("CONFIRMED", current_direction="bullish")
+    selection = SimpleNamespace(available=True)
+    compare = SimpleNamespace(status="COMPARE", report="ROLL COMPARE")
+    with (
+        patch.object(
+            module,
+            "fetch_equity_option_snapshot",
+            return_value=EquityOptionSnapshotResult(snapshot),
+        ),
+        patch.object(
+            module,
+            "evaluate_long_option_position",
+            return_value=SimpleNamespace(status="HOLD", report="POSITION HOLD"),
+        ),
+        patch.object(
+            module,
+            "_refresh_underlying_thesis",
+            return_value=(refresh, "/tmp/AAPL-report.md"),
+        ),
+        patch.object(module, "rank_equity_option_contracts", return_value=selection),
+        patch.object(module, "plan_long_option_roll", return_value=compare),
+        patch.object(
+            module,
+            "compare_hold_vs_roll",
+            return_value=SimpleNamespace(report="HOLD VS ROLL"),
+        ),
+        patch.object(
+            module,
+            "compare_hold_vs_roll_scenarios",
+            side_effect=ValueError("stale roll snapshot"),
+        ),
+    ):
+        rc = module.main(
+            [
+                snapshot.symbol,
+                "--entry-premium",
+                "5",
+                "--contracts",
+                "1",
+                "--plan-roll",
+            ]
+        )
+
+    assert rc == 2
+    assert (
+        "scenario-normalized hold-vs-roll unavailable: stale roll snapshot"
+        in capsys.readouterr().out
+    )

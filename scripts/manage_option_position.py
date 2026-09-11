@@ -11,6 +11,7 @@ from tradingagents.dataflows.equity_options import fetch_equity_option_snapshot
 from tradingagents.dataflows.option_selector import rank_equity_option_contracts
 from tradingagents.instrument_router import classify_instrument
 from tradingagents.option_hold_roll_decision import compare_hold_vs_roll
+from tradingagents.option_hold_roll_scenarios import compare_hold_vs_roll_scenarios
 from tradingagents.option_position_manager import (
     evaluate_long_option_position,
     resolve_long_option_position_inputs,
@@ -267,6 +268,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             print()
             print(hold_roll.report)
+            try:
+                scenario_comparison = compare_hold_vs_roll_scenarios(
+                    snapshot,
+                    roll_plan,
+                    entry_premium=entry_premium,
+                    contracts=contracts,
+                )
+            except ValueError as exc:
+                print(f"<scenario-normalized hold-vs-roll unavailable: {exc}>")
+                return 2
+            print()
+            print(scenario_comparison.report)
+            if scenario_comparison.status != "COMPARE":
+                return 2
 
     final_status = _final_status(
         result.status,
