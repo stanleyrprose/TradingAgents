@@ -335,6 +335,15 @@ Optional portfolio-level risk policy is stored next to the registry as `options_
 
 `options_policy.py set` replaces the complete saved policy rather than silently retaining omitted caps. Dashboard policy checks are only `BREACH`, `OK`, or `NOT_EVALUABLE`; there is no hidden portfolio-risk score. Full-book caps are deliberately `NOT_EVALUABLE` when `options_dashboard.py --underlying ...` is used because a filtered subset must not impersonate the whole book. The dashboard also prints a deterministic Daily Action Queue containing only explicit position exits, portfolio-policy breaches/unavailable checks, and position reviews. Queue entries are review tasks only and never execute a trade, hedge, close, or roll automatically.
 
+Daily operations can compress that queue into a short notification. Preview is the default and has no Telegram side effect:
+
+```bash
+.venv/bin/python scripts/options_daily_ops.py
+.venv/bin/python scripts/options_daily_ops.py --json
+```
+
+Telegram delivery requires an explicit `--send` plus `TRADINGAGENTS_TG_BOT_TOKEN=[REDACTED_SECRET]` and `TRADINGAGENTS_TG_CHAT_ID=<chat_id>` in the process environment. If the action queue is empty, nothing is sent even with `--send`. Successful deliveries write a local `options_daily_ops_receipts.json` receipt containing only an action fingerprint, hashed delivery target, provider message ID, and timestamp; credentials are never persisted. An identical successful message to the same target is deduplicated, while `--force` explicitly bypasses deduplication. Planning and notification never mutate the trade journal or execute orders.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.
