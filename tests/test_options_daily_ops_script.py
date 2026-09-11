@@ -8,6 +8,7 @@ from tradingagents.dataflows.equity_options import (
     EquityOptionSnapshot,
     EquityOptionSnapshotResult,
 )
+from tradingagents.option_daily_scheduler import save_telegram_credentials
 from tradingagents.option_position_registry import OptionPositionRegistry
 from tradingagents.telegram_delivery import TelegramSendResult
 
@@ -239,3 +240,75 @@ def test_json_preview_is_machine_readable(tmp_path, capsys):
     assert payload["counts"]["POSITION_EXIT"] == 1
     assert payload["delivery"] is None
     assert len(payload["fingerprint"]) == 64
+
+
+def test_send_can_load_secure_credential_file_when_env_is_absent(tmp_path, capsys, monkeypatch):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry)
+    credential_path = save_telegram_credentials(
+        tmp_path / "telegram.json",
+        credential="dummy-credential",
+        target="12345",
+    )
+    monkeypatch.delenv(module._CREDENTIAL_ENV, raising=False)
+    monkeypatch.delenv(module._TARGET_ENV, raising=False)
+    with (
+        patch.object(module, "fetch_equity_option_snapshots", return_value={CALL: _snapshot()}),
+        patch.object(
+            module,
+            "send_telegram_text",
+            return_value=TelegramSendResult(provider_message_id=88),
+        ) as send,
+    ):
+        rc = module.main(
+            [
+                "--db",
+                str(registry.path),
+                "--date",
+                TODAY.isoformat(),
+                "--receipt",
+                str(tmp_path / "receipts.json"),
+                "--telegram-config",
+                str(credential_path),
+                "--send",
+            ]
+        )
+    assert rc == 0
+    assert "Delivery: SENT" in capsys.readouterr().out
+    assert send.call_args.kwargs["credential"] == "dummy-credential"
+    assert send.call_args.kwargs["target"] == "12345"
+
+
+def test_partial_environment_configuration_fails_closed_even_with_file(tmp_path, capsys, monkeypatch):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry)
+    credential_path = save_telegram_credentials(
+        tmp_path / "telegram.json",
+        credential="file-secret",
+        target="12345",
+    )
+    monkeypatch.setenv(module._CREDENTIAL_ENV, "partial-secret")
+    monkeypatch.delenv(module._TARGET_ENV, raising=False)
+    with (
+        patch.object(module, "fetch_equity_option_snapshots", return_value={CALL: _snapshot()}),
+        patch.object(module, "send_telegram_text") as send,
+    ):
+        rc = module.main(
+            [
+                "--db",
+                str(registry.path),
+                "--date",
+                TODAY.isoformat(),
+                "--telegram-config",
+                str(credential_path),
+                "--send",
+            ]
+        )
+    assert rc == 2
+    send.assert_not_called()
+    output = capsys.readouterr().out
+    assert "environment configuration is incomplete" in output
+    assert "partial-secret" not in output
+    assert "file-secret" not in output

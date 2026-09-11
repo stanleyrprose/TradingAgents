@@ -7,6 +7,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -20,6 +21,7 @@ _OCC_RE = re.compile(
     r"(?P<root>[A-Z]{1,6})(?P<expiry>\d{6})(?P<right>[CP])(?P<strike>\d{8})"
 )
 _NA = "DATA_UNAVAILABLE"
+_US_OPTION_MARKET_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -70,9 +72,32 @@ class EquityOptionSnapshotResult:
         return self.snapshot is not None and self.unavailable_reason is None
 
 
+def current_us_option_market_date(now: datetime | None = None) -> date:
+    """Return the New York calendar date used by US equity-option sources."""
+    if now is None:
+        return datetime.now(_US_OPTION_MARKET_TZ).date()
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    return now.astimezone(_US_OPTION_MARKET_TZ).date()
+
+
 def _today() -> date:
-    """Return the local calendar date; kept separate for deterministic tests."""
-    return date.today()
+    """Return the current US option-market date; kept separate for deterministic tests."""
+    return current_us_option_market_date()
+
+
+def _source_market_date(data: dict, payload: dict) -> date | None:
+    """Extract the source market date from Cboe's timestamp without assuming host timezone."""
+    timestamp = data.get("timestamp", payload.get("timestamp"))
+    if timestamp is None:
+        return None
+    text = str(timestamp).strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _unavailable(reason: str) -> str:
@@ -226,6 +251,20 @@ def fetch_equity_option_snapshots(
             data = payload.get("data")
             if not isinstance(data, dict):
                 raise ValueError("response data is not an object")
+            source_date = _source_market_date(data, payload)
+            if source_date is None:
+                reason = "Cboe source timestamp is missing/unparseable; market date cannot be verified"
+                for contract in contracts:
+                    results[contract.symbol] = EquityOptionSnapshotResult(None, reason)
+                continue
+            if source_date != requested_date:
+                reason = (
+                    f"Cboe source market date {source_date.isoformat()} does not match requested "
+                    f"US market date {requested_date.isoformat()}"
+                )
+                for contract in contracts:
+                    results[contract.symbol] = EquityOptionSnapshotResult(None, reason)
+                continue
             options = data.get("options")
             if not isinstance(options, list):
                 raise ValueError("response options is not a list")
@@ -484,6 +523,16 @@ def fetch_equity_option_context(
         data = payload.get("data")
         if not isinstance(data, dict):
             raise ValueError("response data is not an object")
+        source_date = _source_market_date(data, payload)
+        if source_date is None:
+            return _unavailable(
+                "Cboe source timestamp is missing/unparseable; market date cannot be verified"
+            )
+        if source_date != requested_date:
+            return _unavailable(
+                f"Cboe source market date {source_date.isoformat()} does not match requested "
+                f"US market date {requested_date.isoformat()}"
+            )
         options = data.get("options")
         if not isinstance(options, list):
             raise ValueError("response options is not a list")

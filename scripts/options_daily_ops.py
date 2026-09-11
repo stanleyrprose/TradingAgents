@@ -10,7 +10,10 @@ import sqlite3
 from dataclasses import asdict
 from datetime import date
 
-from tradingagents.dataflows.equity_options import fetch_equity_option_snapshots
+from tradingagents.dataflows.equity_options import (
+    current_us_option_market_date,
+    fetch_equity_option_snapshots,
+)
 from tradingagents.option_daily_ops import (
     build_option_daily_brief,
     deduplicated_delivery_result,
@@ -19,6 +22,7 @@ from tradingagents.option_daily_ops import (
     record_successful_delivery,
     successful_receipt_exists,
 )
+from tradingagents.option_daily_scheduler import load_telegram_credentials
 from tradingagents.option_portfolio_dashboard import build_option_portfolio_dashboard
 from tradingagents.option_portfolio_policy import (
     OptionPortfolioRiskPolicy,
@@ -37,10 +41,18 @@ _TARGET_ENV = "TRADINGAGENTS_" + "TG_" + "CHAT_" + "ID"
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", help="override option registry SQLite path")
-    parser.add_argument("--date", default=date.today().isoformat(), help="YYYY-MM-DD (current Cboe day only)")
+    parser.add_argument(
+        "--date",
+        default=current_us_option_market_date().isoformat(),
+        help="YYYY-MM-DD US option-market date; defaults to current America/New_York date",
+    )
     parser.add_argument("--policy", help="explicit portfolio policy JSON path override")
     parser.add_argument("--no-policy", action="store_true", help="ignore any saved portfolio policy for this run")
     parser.add_argument("--receipt", help="override exact-message delivery receipt JSON path")
+    parser.add_argument(
+        "--telegram-config",
+        help="0600 JSON credential file used when Telegram env vars are not set",
+    )
     parser.add_argument("--max-actions", type=int, default=8, help="maximum action lines in the short brief (1-20)")
     parser.add_argument("--send", action="store_true", help="explicitly enable Telegram delivery")
     parser.add_argument("--force", action="store_true", help="with --send, bypass exact-message receipt deduplication")
@@ -48,14 +60,21 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _credentials() -> tuple[str, str]:
+def _credentials(config_path: str | None = None) -> tuple[str, str]:
     credential = os.getenv(_CREDENTIAL_ENV, "").strip()
     target = os.getenv(_TARGET_ENV, "").strip()
-    if not credential or not target:
-        raise ValueError(
-            f"Telegram delivery requires environment variables {_CREDENTIAL_ENV} and {_TARGET_ENV}"
-        )
-    return credential, target
+    if credential or target:
+        if not credential or not target:
+            raise ValueError(
+                f"Telegram environment configuration is incomplete; set both {_CREDENTIAL_ENV} and {_TARGET_ENV}"
+            )
+        return credential, target
+    if config_path:
+        configured = load_telegram_credentials(config_path)
+        return configured.credential, configured.target
+    raise ValueError(
+        f"Telegram delivery requires environment variables {_CREDENTIAL_ENV} and {_TARGET_ENV} or --telegram-config"
+    )
 
 
 def _payload(brief, delivery, policy_status: str) -> dict:
@@ -112,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         elif not args.send:
             status_line = "PREVIEW_ONLY"
         else:
-            credential, target = _credentials()
+            credential, target = _credentials(args.telegram_config)
             receipt_path = args.receipt or default_daily_ops_receipt_path(args.db)
             target_hash = delivery_target_hash(target)
             if not args.force and successful_receipt_exists(

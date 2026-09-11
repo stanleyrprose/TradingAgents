@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import pytest
@@ -7,6 +7,7 @@ import requests
 from tradingagents.agents.utils.options_data_tools import get_equity_option_context
 from tradingagents.dataflows.equity_options import (
     _parse_occ,
+    current_us_option_market_date,
     fetch_equity_option_context,
     fetch_equity_option_snapshot,
     fetch_equity_option_snapshots,
@@ -112,6 +113,15 @@ def _fetch(payload=None):
         result = fetch_equity_option_context(SYMBOL, TODAY.isoformat())
     get.assert_called_once()
     return result
+
+
+def test_us_option_market_date_uses_new_york_not_host_calendar_date():
+    yangon = timezone(timedelta(hours=6, minutes=30))
+    host_time = datetime(2026, 9, 12, 0, 30, tzinfo=yangon)
+
+    assert current_us_option_market_date(host_time) == date(2026, 9, 11)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        current_us_option_market_date(datetime(2026, 9, 12, 0, 30))
 
 
 def test_parse_occ_extracts_fields_and_rejects_invalid_dates_and_format():
@@ -316,6 +326,35 @@ def test_structured_snapshot_returns_exact_contract_without_markdown_parsing():
     assert snapshot.open_interest == 100
     assert snapshot.volume == 10
     get.assert_called_once()
+
+
+def test_structured_snapshot_fails_closed_when_cboe_source_market_date_is_stale():
+    payload = _payload()
+    payload["data"]["timestamp"] = "2026-09-09 16:15:00"
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            return_value=_response(payload),
+        ),
+    ):
+        result = fetch_equity_option_snapshot(SYMBOL, TODAY.isoformat())
+
+    assert not result.available
+    assert result.snapshot is None
+    assert "source market date 2026-09-09" in result.unavailable_reason
+    assert "requested US market date 2026-09-10" in result.unavailable_reason
+
+
+def test_context_fails_closed_when_cboe_source_market_date_is_stale():
+    payload = _payload()
+    payload["data"]["timestamp"] = "2026-09-09 16:15:00"
+
+    result = _fetch(payload)
+
+    assert "equity option context unavailable" in result
+    assert "source market date 2026-09-09" in result
+    assert "requested US market date 2026-09-10" in result
 
 
 def test_structured_snapshot_preserves_zero_bid_as_liquidation_input():
