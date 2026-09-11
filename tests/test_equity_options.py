@@ -9,6 +9,7 @@ from tradingagents.dataflows.equity_options import (
     _parse_occ,
     fetch_equity_option_context,
     fetch_equity_option_snapshot,
+    fetch_equity_option_snapshots,
 )
 
 TODAY = date(2026, 9, 10)
@@ -382,3 +383,99 @@ def test_structured_snapshot_request_exception_is_fail_soft():
     assert not result.available
     assert result.snapshot is None
     assert result.unavailable_reason == "Timeout"
+
+
+def test_batch_snapshots_reuse_one_chain_request_for_same_underlying():
+    second = "AAPL260918C00315000"
+    payload = _payload()
+    payload["data"]["options"][1].update(
+        bid=4.0,
+        ask=4.5,
+        gamma=0.02,
+        vega=0.18,
+        theta=-0.09,
+    )
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            return_value=_response(payload),
+        ) as get,
+    ):
+        results = fetch_equity_option_snapshots([SYMBOL, second], TODAY.isoformat())
+
+    assert results[SYMBOL].available
+    assert results[second].available
+    assert results[second].snapshot is not None
+    assert results[second].snapshot.bid == 4.0
+    get.assert_called_once()
+
+
+def test_batch_snapshots_use_one_request_per_underlying():
+    msft_symbol = "MSFT260918C00400000"
+    msft_payload = {
+        "data": {
+            "timestamp": "2026-09-10 15:45:00",
+            "current_price": 410,
+            "options": [
+                _option(
+                    msft_symbol,
+                    iv=0.25,
+                    delta=0.60,
+                    oi=50,
+                    volume=5,
+                    bid=12,
+                    ask=13,
+                    gamma=0.01,
+                    vega=0.20,
+                    theta=-0.10,
+                )
+            ],
+        }
+    }
+
+    def fake_get(url, **_kwargs):
+        return _response(msft_payload if "MSFT" in url else _payload())
+
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            side_effect=fake_get,
+        ) as get,
+    ):
+        results = fetch_equity_option_snapshots([SYMBOL, msft_symbol], TODAY.isoformat())
+
+    assert results[SYMBOL].available
+    assert results[msft_symbol].available
+    assert get.call_count == 2
+
+
+def test_batch_snapshot_preflight_fails_without_network_and_preserves_invalid_symbol_reason():
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch("tradingagents.dataflows.equity_options.requests.get") as get,
+    ):
+        results = fetch_equity_option_snapshots([SYMBOL, "bad"], "2026-09-09")
+
+    assert not results[SYMBOL].available
+    assert "historical/future" in results[SYMBOL].unavailable_reason
+    assert results["bad"].unavailable_reason == "invalid OCC option symbol"
+    get.assert_not_called()
+
+
+def test_batch_snapshot_missing_one_contract_does_not_hide_other_available_contracts():
+    missing = "AAPL260918C00999000"
+    with (
+        patch("tradingagents.dataflows.equity_options._today", return_value=TODAY),
+        patch(
+            "tradingagents.dataflows.equity_options.requests.get",
+            return_value=_response(_payload()),
+        ) as get,
+    ):
+        results = fetch_equity_option_snapshots([SYMBOL, missing], TODAY.isoformat())
+
+    assert results[SYMBOL].available
+    assert not results[missing].available
+    assert results[missing].unavailable_reason == f"exact contract {missing} not found"
+    get.assert_called_once()

@@ -308,6 +308,18 @@ A registered open position can be managed without retyping its current OCC symbo
 
 Underlying lookup fails closed when multiple open positions match; use the position ID in that case. Analysis and roll planning never record an execution event automatically. Only explicit `options_registry.py open`, `roll`, or `close` commands record trade fills. Stored Greek limits remain part of the auditable journal in v1.8, but the existing-position manager does not silently re-enforce them.
 
+The daily portfolio dashboard refreshes every open registered position in one deterministic book view:
+
+```bash
+.venv/bin/python scripts/options_dashboard.py
+.venv/bin/python scripts/options_dashboard.py --underlying AAPL
+.venv/bin/python scripts/options_dashboard.py --json
+```
+
+The dashboard batches Cboe requests by underlying, so multiple AAPL option positions share one delayed option-chain request instead of fetching the same chain once per contract. Positions are ordered by explicit lifecycle state only: `EXIT`, `REVIEW`, `HOLD`, then `REPORT_ONLY`, with shorter DTE first inside the same state. `EXIT` requires a stored exit-policy trigger; `REVIEW` means market data or a stored policy check is unavailable; `HOLD` means a stored exit policy exists and no condition is triggered; `REPORT_ONLY` means no exit policy was stored. This is deterministic triage, not a hidden weighted score or expected-return ranking.
+
+Book P/L keeps current-leg and cumulative lifecycle economics separate. Greek exposure is aggregated only within the same underlying; share deltas from unrelated underlyings are never netted together. If any open leg lacks current market data, strict book totals are reported unavailable rather than silently summing a partial book.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.
