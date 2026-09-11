@@ -320,6 +320,21 @@ The dashboard batches Cboe requests by underlying, so multiple AAPL option posit
 
 Book P/L keeps current-leg and cumulative lifecycle economics separate. Greek exposure is aggregated only within the same underlying; share deltas from unrelated underlyings are never netted together. If any open leg lacks current market data, strict book totals are reported unavailable rather than silently summing a partial book.
 
+Optional portfolio-level risk policy is stored next to the registry as `options_policy.json` (or override with `TRADINGAGENTS_OPTION_PORTFOLIO_POLICY` / `--policy`). No limits exist until you explicitly save them:
+
+```bash
+.venv/bin/python scripts/options_policy.py set \
+  --max-book-liquidation-value 10000 \
+  --max-book-gross-theta-dollars-per-day 100 \
+  --max-underlying-abs-delta-shares 150 \
+  --max-underlying-gross-delta-shares 250
+
+.venv/bin/python scripts/options_policy.py show
+.venv/bin/python scripts/options_dashboard.py
+```
+
+`options_policy.py set` replaces the complete saved policy rather than silently retaining omitted caps. Dashboard policy checks are only `BREACH`, `OK`, or `NOT_EVALUABLE`; there is no hidden portfolio-risk score. Full-book caps are deliberately `NOT_EVALUABLE` when `options_dashboard.py --underlying ...` is used because a filtered subset must not impersonate the whole book. The dashboard also prints a deterministic Daily Action Queue containing only explicit position exits, portfolio-policy breaches/unavailable checks, and position reviews. Queue entries are review tasks only and never execute a trade, hedge, close, or roll automatically.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.

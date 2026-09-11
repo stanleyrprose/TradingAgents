@@ -8,6 +8,10 @@ from tradingagents.dataflows.equity_options import (
     EquityOptionSnapshot,
     EquityOptionSnapshotResult,
 )
+from tradingagents.option_portfolio_policy import (
+    resolve_portfolio_risk_policy,
+    save_portfolio_risk_policy,
+)
 from tradingagents.option_position_registry import OptionPositionRegistry
 
 TODAY = date(2026, 9, 11)
@@ -186,3 +190,140 @@ def test_invalid_date_fails_before_registry_network_refresh(tmp_path, capsys):
     assert rc == 2
     fetch.assert_not_called()
     assert "date must be YYYY-MM-DD" in capsys.readouterr().out
+
+
+def test_saved_sibling_policy_adds_breach_and_action_queue(tmp_path, capsys):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry, CALL1, "aapl", policy={"take_profit_pct": 50.0})
+    save_portfolio_risk_policy(
+        resolve_portfolio_risk_policy(
+            max_book_liquidation_value=900,
+            max_underlying_abs_delta_shares=50,
+        ),
+        tmp_path / "options_policy.json",
+    )
+
+    with patch.object(
+        module,
+        "fetch_equity_option_snapshots",
+        return_value={CALL1: _snapshot(CALL1, bid=10.0, delta=0.6)},
+    ):
+        rc = module.main(["--db", str(registry.path), "--date", TODAY.isoformat()])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "# Option portfolio risk policy" in output
+    assert "Status: **BREACH**" in output
+    assert "# Option daily action queue" in output
+    assert "POLICY_BREACH" in output
+
+
+def test_json_output_includes_policy_checks_and_actions(tmp_path, capsys):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry, CALL1, "aapl", policy={"take_profit_pct": 10.0})
+    save_portfolio_risk_policy(
+        resolve_portfolio_risk_policy(max_underlying_abs_delta_shares=50),
+        tmp_path / "options_policy.json",
+    )
+
+    with patch.object(
+        module,
+        "fetch_equity_option_snapshots",
+        return_value={CALL1: _snapshot(CALL1, bid=10.0, delta=0.6)},
+    ):
+        rc = module.main(
+            ["--db", str(registry.path), "--date", TODAY.isoformat(), "--json"]
+        )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["portfolio_policy"]["status"] == "BREACH"
+    assert payload["portfolio_policy"]["breach_count"] == 1
+    assert [item["kind"] for item in payload["actions"]] == [
+        "POSITION_EXIT",
+        "POLICY_BREACH",
+    ]
+
+
+def test_underlying_filter_makes_book_policy_not_evaluable(tmp_path, capsys):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry, CALL1, "aapl")
+    save_portfolio_risk_policy(
+        resolve_portfolio_risk_policy(
+            max_book_liquidation_value=5000,
+            max_underlying_abs_delta_shares=100,
+        ),
+        tmp_path / "options_policy.json",
+    )
+
+    with patch.object(
+        module,
+        "fetch_equity_option_snapshots",
+        return_value={CALL1: _snapshot(CALL1, bid=10.0, delta=0.6)},
+    ):
+        rc = module.main(
+            [
+                "--db",
+                str(registry.path),
+                "--date",
+                TODAY.isoformat(),
+                "--underlying",
+                "AAPL",
+            ]
+        )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Status: **NOT_EVALUABLE**" in output
+    assert "full-book policy cannot be evaluated from a filtered dashboard" in output
+    assert "absolute net delta shares 60.00 is within cap 100.00" in output
+
+
+def test_no_policy_flag_bypasses_saved_policy_for_one_run(tmp_path, capsys):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry, CALL1, "aapl")
+    save_portfolio_risk_policy(
+        resolve_portfolio_risk_policy(max_book_liquidation_value=1),
+        tmp_path / "options_policy.json",
+    )
+
+    with patch.object(
+        module,
+        "fetch_equity_option_snapshots",
+        return_value={CALL1: _snapshot(CALL1)},
+    ):
+        rc = module.main(
+            [
+                "--db",
+                str(registry.path),
+                "--date",
+                TODAY.isoformat(),
+                "--no-policy",
+            ]
+        )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Status: **NOT_CONFIGURED**" in output
+    assert "POLICY_BREACH" not in output
+
+
+def test_invalid_policy_file_fails_closed_before_rendering_dashboard(tmp_path, capsys):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry, CALL1, "aapl")
+    (tmp_path / "options_policy.json").write_text("not-json", encoding="utf-8")
+
+    with patch.object(
+        module,
+        "fetch_equity_option_snapshots",
+        return_value={CALL1: _snapshot(CALL1)},
+    ):
+        rc = module.main(["--db", str(registry.path), "--date", TODAY.isoformat()])
+
+    assert rc == 2
+    assert "invalid option portfolio policy file" in capsys.readouterr().out
