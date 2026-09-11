@@ -10,6 +10,7 @@ from datetime import date
 from tradingagents.dataflows.equity_options import fetch_equity_option_snapshot
 from tradingagents.dataflows.option_selector import rank_equity_option_contracts
 from tradingagents.instrument_router import classify_instrument
+from tradingagents.option_hold_roll_decision import compare_hold_vs_roll
 from tradingagents.option_position_manager import (
     evaluate_long_option_position,
     resolve_long_option_position_inputs,
@@ -257,6 +258,15 @@ def main(argv: list[str] | None = None) -> int:
         print(roll_plan.report)
         if roll_plan.status == "REVIEW":
             return 2
+        if roll_plan.status == "COMPARE":
+            hold_roll = compare_hold_vs_roll(
+                snapshot,
+                roll_plan,
+                entry_premium=entry_premium,
+                contracts=contracts,
+            )
+            print()
+            print(hold_roll.report)
 
     final_status = _final_status(
         result.status,

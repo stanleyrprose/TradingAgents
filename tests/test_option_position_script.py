@@ -503,6 +503,7 @@ def test_plan_roll_neutral_refresh_never_calls_selector(capsys):
         ) as refresh_call,
         patch.object(module, "rank_equity_option_contracts") as selector,
         patch.object(module, "plan_long_option_roll", return_value=no_roll) as planner,
+        patch.object(module, "compare_hold_vs_roll") as hold_roll,
     ):
         rc = module.main(
             [
@@ -527,6 +528,7 @@ def test_plan_roll_neutral_refresh_never_calls_selector(capsys):
         selection=None,
         top_n=3,
     )
+    hold_roll.assert_not_called()
     assert "ROLL NO_ROLL" in capsys.readouterr().out
 
 
@@ -556,6 +558,11 @@ def test_plan_roll_confirmed_refresh_calls_selector_with_current_delta_and_later
             module, "rank_equity_option_contracts", return_value=selection
         ) as selector,
         patch.object(module, "plan_long_option_roll", return_value=compare) as planner,
+        patch.object(
+            module,
+            "compare_hold_vs_roll",
+            return_value=SimpleNamespace(report="HOLD VS ROLL"),
+        ) as hold_roll,
     ):
         rc = module.main(
             [
@@ -587,7 +594,15 @@ def test_plan_roll_confirmed_refresh_calls_selector_with_current_delta_and_later
         selection=selection,
         top_n=3,
     )
-    assert "ROLL COMPARE" in capsys.readouterr().out
+    hold_roll.assert_called_once_with(
+        snapshot,
+        compare,
+        entry_premium=5.0,
+        contracts=2,
+    )
+    output = capsys.readouterr().out
+    assert "ROLL COMPARE" in output
+    assert "HOLD VS ROLL" in output
 
 
 def test_plan_roll_explicit_tuning_overrides_default_selector_targets():
