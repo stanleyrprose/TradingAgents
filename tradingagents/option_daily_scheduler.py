@@ -107,27 +107,40 @@ def load_telegram_credentials(
 def render_launchd_plist(
     *,
     label: str,
-    repo_root: str | os.PathLike[str],
-    python_path: str | os.PathLike[str],
+    repo_root: str | os.PathLike[str] | None,
+    python_path: str | os.PathLike[str] | None,
     schedule_time: str,
     log_dir: str | os.PathLike[str],
     preview: bool,
     credential_path: str | os.PathLike[str] | None = None,
     registry_db_path: str | os.PathLike[str] | None = None,
     policy_path: str | os.PathLike[str] | None = None,
+    runner_path: str | os.PathLike[str] | None = None,
+    working_directory: str | os.PathLike[str] | None = None,
 ) -> bytes:
     job_label = str(label).strip()
     if not job_label:
         raise ValueError("launchd label must be nonempty")
     hour, minute = parse_schedule_time(schedule_time)
-    repo = Path(repo_root).expanduser().resolve()
-    # Preserve the virtualenv launcher path. Resolving the symlink would replace
-    # .venv/bin/python with the base interpreter and lose the venv site-packages.
-    python = Path(python_path).expanduser().absolute()
-    script = repo / "scripts" / "options_daily_ops.py"
     logs = Path(log_dir).expanduser().resolve()
-
-    arguments = [str(python), str(script)]
+    if runner_path is not None:
+        runner = Path(runner_path).expanduser().absolute()
+        arguments = [str(runner)]
+        workdir = (
+            Path(working_directory).expanduser().resolve()
+            if working_directory is not None
+            else runner.parent.parent.resolve()
+        )
+    else:
+        if repo_root is None or python_path is None:
+            raise ValueError("source scheduler requires repo_root and python_path")
+        repo = Path(repo_root).expanduser().resolve()
+        # Preserve the virtualenv launcher path. Resolving the symlink would replace
+        # .venv/bin/python with the base interpreter and lose the venv site-packages.
+        python = Path(python_path).expanduser().absolute()
+        script = repo / "scripts" / "options_daily_ops.py"
+        arguments = [str(python), str(script)]
+        workdir = repo
     if registry_db_path is not None:
         arguments.extend(["--db", str(Path(registry_db_path).expanduser())])
     if policy_path is not None:
@@ -146,7 +159,7 @@ def render_launchd_plist(
     payload = {
         "Label": job_label,
         "ProgramArguments": arguments,
-        "WorkingDirectory": str(repo),
+        "WorkingDirectory": str(workdir),
         "StartCalendarInterval": [
             {"Weekday": weekday, "Hour": hour, "Minute": minute}
             for weekday in range(1, 6)

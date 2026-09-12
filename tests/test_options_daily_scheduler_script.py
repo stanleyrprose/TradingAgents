@@ -50,6 +50,7 @@ def test_production_install_requires_existing_secure_credentials_before_launchct
                 "--log-dir",
                 str(tmp_path / "logs"),
                 "install",
+                "--source-checkout",
             ]
         )
     assert rc == 2
@@ -72,6 +73,7 @@ def test_preview_install_writes_non_sending_plist_and_calls_launchctl(tmp_path, 
                 "--log-dir",
                 str(log_dir),
                 "install",
+                "--source-checkout",
                 "--preview",
                 "--time",
                 "07:45",
@@ -117,6 +119,7 @@ def test_send_install_plist_contains_path_not_credential_value(tmp_path, capsys)
                 "--log-dir",
                 str(tmp_path / "logs"),
                 "install",
+                "--source-checkout",
             ]
         )
     assert rc == 0
@@ -130,6 +133,59 @@ def test_send_install_plist_contains_path_not_credential_value(tmp_path, capsys)
     output = capsys.readouterr().out
     assert "dummy-secret" not in output
     assert "12345" not in output
+
+
+def test_hardened_runtime_install_uses_stable_runner(tmp_path, capsys):
+    module = _load_script()
+    runtime_root = tmp_path / "runtime"
+    runner = runtime_root / "bin" / "options-daily-runner"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runner.chmod(0o755)
+    agent_dir = tmp_path / "agents"
+    log_dir = tmp_path / "logs"
+
+    with patch.object(module, "_launchctl", return_value=Mock(returncode=0, stdout="")):
+        rc = module.main(
+            [
+                "--label",
+                "com.test.runtime",
+                "--runtime-root",
+                str(runtime_root),
+                "--launch-agent-dir",
+                str(agent_dir),
+                "--log-dir",
+                str(log_dir),
+                "install",
+                "--preview",
+            ]
+        )
+
+    assert rc == 0
+    payload = plistlib.loads((agent_dir / "com.test.runtime.plist").read_bytes())
+    assert payload["ProgramArguments"] == [str(runner.absolute())]
+    assert payload["WorkingDirectory"] == str(runtime_root.resolve())
+    output = capsys.readouterr().out
+    assert "Runtime mode: HARDENED" in output
+    assert str(runner) in output
+
+
+def test_hardened_runtime_install_fails_before_launchctl_when_runner_missing(tmp_path, capsys):
+    module = _load_script()
+    with patch.object(module, "_launchctl") as launchctl:
+        rc = module.main(
+            [
+                "--runtime-root",
+                str(tmp_path / "runtime"),
+                "--launch-agent-dir",
+                str(tmp_path / "agents"),
+                "install",
+                "--preview",
+            ]
+        )
+    assert rc == 2
+    launchctl.assert_not_called()
+    assert "hardened option runtime is not installed" in capsys.readouterr().out
 
 
 def test_status_reports_not_loaded(tmp_path, capsys):

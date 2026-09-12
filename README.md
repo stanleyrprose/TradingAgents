@@ -344,16 +344,41 @@ Daily operations can compress that queue into a short notification. Preview is t
 
 Telegram delivery requires an explicit `--send` plus either `TRADINGAGENTS_TG_BOT_TOKEN=[REDACTED_SECRET]` and `TRADINGAGENTS_TG_CHAT_ID=<chat_id>` in the process environment, or a secure `--telegram-config` file. If the action queue is empty, nothing is sent even with `--send`. Successful deliveries write a local `options_daily_ops_receipts.json` receipt containing only an action fingerprint, hashed delivery target, provider message ID, and timestamp; credentials are never persisted in the receipt. An identical successful message to the same target is deduplicated, while `--force` explicitly bypasses deduplication. Planning and notification never mutate the trade journal or execute orders.
 
-For unattended macOS operation, the launchd helper stores Telegram credentials separately from the plist and requires file permissions `0600` or stricter. The token/chat ID are never embedded in the LaunchAgent:
+For unattended macOS operation, the launchd helper stores Telegram credentials separately from the plist and requires file permissions `0600` or stricter. The token/chat ID are never embedded in the LaunchAgent. Production execution is installed outside the Git checkout under `~/.tradingagents/options-runtime/`:
+
+```text
+~/.tradingagents/options-runtime/
+├── releases/<git-sha>/app/       # read-only git archive
+├── envs/<dependency-hash>/venv/  # production-owned dependency environment
+├── current -> releases/<sha>
+├── previous -> releases/<sha>
+└── bin/options-daily-runner      # stable launchd entrypoint
+```
+
+Install only a clean Git revision that matches its configured upstream, validate it, then bind launchd to the stable runtime runner:
 
 ```bash
+.venv/bin/python scripts/options_runtime.py install
+.venv/bin/python scripts/options_runtime.py list
 .venv/bin/python scripts/options_daily_scheduler.py configure-telegram
 .venv/bin/python scripts/options_daily_scheduler.py install
+.venv/bin/python scripts/options_runtime.py health
+```
+
+`options_runtime.py install` snapshots `HEAD` with `git archive`, copies the current verified dependency environment into a production-owned venv keyed by a dependency fingerprint, removes the editable TradingAgents link back to the development checkout, makes the release `app/` tree read-only, and atomically switches `current`. Different code revisions with the same Python/dependency set reuse one production environment rather than duplicating it. `options_runtime.py rollback` switches back to `previous` (or `--to <sha-prefix>`), and `options_runtime.py prune --keep 3` removes only inactive old releases while preserving `current` and `previous`.
+
+The production scheduler runs Monday-Friday at **22:00 Mac local time** by default. This time intentionally overlaps regular US equity-option market hours in both US daylight and standard time when the Mac remains on Myanmar time. Daily Ops derives its default market date from `America/New_York`, not the Mac calendar date, and Cboe snapshots fail closed when the source timestamp date does not match that US market date. The scheduler now defaults to the hardened runtime and refuses installation when its stable runner is missing. `install --source-checkout` is retained only for bounded development/launchd smoke tests. `options_runtime.py health` checks the active release, runtime runner, production dependency environment, LaunchAgent binding, SEND mode, credential-file indirection, absence of Telegram secrets in plist environment variables, and whether launchd currently has the production label loaded.
+
+Operational commands:
+
+```bash
+.venv/bin/python scripts/options_runtime.py health
+.venv/bin/python scripts/options_runtime.py rollback
+.venv/bin/python scripts/options_runtime.py rollback --to <sha-prefix>
+.venv/bin/python scripts/options_runtime.py prune --keep 3
 .venv/bin/python scripts/options_daily_scheduler.py status
 .venv/bin/python scripts/options_daily_scheduler.py uninstall
 ```
-
-The production scheduler runs Monday-Friday at **22:00 Mac local time** by default. This time intentionally overlaps regular US equity-option market hours in both US daylight and standard time when the Mac remains on Myanmar time. Daily Ops derives its default market date from `America/New_York`, not the Mac calendar date, and Cboe snapshots fail closed when the source timestamp date does not match that US market date. Use `install --preview --kickstart` to validate launchd/TCC/logging without requesting Telegram credentials or sending a message. The current scheduler executes from the reviewed source checkout, so the LaunchAgent depends on that checkout and its `.venv` remaining accessible; it is not yet a separately installed immutable runtime.
 
 ## Reproducibility
 

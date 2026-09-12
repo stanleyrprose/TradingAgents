@@ -20,6 +20,7 @@ from tradingagents.option_daily_scheduler import (
     save_telegram_credentials,
     write_launchd_plist,
 )
+from tradingagents.option_runtime import default_runtime_root, runtime_runner_path
 
 
 def _repo_root() -> Path:
@@ -36,6 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--log-dir", default=str(default_scheduler_log_dir()))
     parser.add_argument("--credential-file", default=str(default_scheduler_credential_path()))
+    parser.add_argument("--runtime-root", default=str(default_runtime_root()))
     parser.add_argument("--db", help="optional registry SQLite override passed to daily ops")
     parser.add_argument("--policy", help="optional portfolio policy JSON override passed to daily ops")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -58,6 +60,11 @@ def _parser() -> argparse.ArgumentParser:
         "--kickstart",
         action="store_true",
         help="run the newly installed job immediately once",
+    )
+    install.add_argument(
+        "--source-checkout",
+        action="store_true",
+        help="use the editable source checkout instead of the hardened production runtime",
     )
 
     sub.add_parser("status", help="print launchctl state for the configured label")
@@ -100,12 +107,19 @@ def _configure(args) -> int:
 def _install(args) -> int:
     parse_schedule_time(args.time)
     repo = _repo_root()
+    runtime_root = Path(args.runtime_root).expanduser()
+    runner = runtime_runner_path(runtime_root)
     python_path = repo / ".venv" / "bin" / "python"
     daily_script = repo / "scripts" / "options_daily_ops.py"
-    if not python_path.exists():
-        raise ValueError(f"project virtualenv Python not found: {python_path}")
-    if not daily_script.exists():
-        raise ValueError(f"daily operations script not found: {daily_script}")
+    if args.source_checkout:
+        if not python_path.exists():
+            raise ValueError(f"project virtualenv Python not found: {python_path}")
+        if not daily_script.exists():
+            raise ValueError(f"daily operations script not found: {daily_script}")
+    elif not runner.exists():
+        raise ValueError(
+            f"hardened option runtime is not installed: {runner}; run scripts/options_runtime.py install"
+        )
 
     credential_path = Path(args.credential_file).expanduser()
     if not args.preview:
@@ -115,14 +129,16 @@ def _install(args) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     content = render_launchd_plist(
         label=args.label,
-        repo_root=repo,
-        python_path=python_path,
+        repo_root=repo if args.source_checkout else None,
+        python_path=python_path if args.source_checkout else None,
         schedule_time=args.time,
         log_dir=log_dir,
         preview=args.preview,
         credential_path=None if args.preview else credential_path,
         registry_db_path=args.db,
         policy_path=args.policy,
+        runner_path=None if args.source_checkout else runner,
+        working_directory=repo if args.source_checkout else runtime_root,
     )
     target = write_launchd_plist(_target_plist(args), content)
     domain = _domain()
@@ -141,7 +157,11 @@ def _install(args) -> int:
         print("Preview mode never requests Telegram credentials and never sends Telegram.")
     else:
         print(f"Credential file: {credential_path} (contents not printed)")
-    print("Runtime mode: source checkout; launchd must retain access to this repository path.")
+    if args.source_checkout:
+        print("Runtime mode: SOURCE_CHECKOUT (development/smoke only).")
+    else:
+        print(f"Runtime mode: HARDENED ({runtime_root})")
+        print(f"Runner: {runner}")
     return 0
 
 
