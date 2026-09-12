@@ -25,6 +25,7 @@ def _release(root: Path, name: str, *, created_at: str) -> Path:
     app = release / "app"
     (app / "scripts").mkdir(parents=True)
     (app / "scripts" / "options_daily_ops.py").write_text("print('ok')\n", encoding="utf-8")
+    (app / "scripts" / "options_ops_watchdog.py").write_text("print('ok')\n", encoding="utf-8")
     env_rel = f"envs/deps-{name}/venv"
     env_python = root / env_rel / "bin" / "python"
     env_python.parent.mkdir(parents=True)
@@ -43,9 +44,11 @@ def _release(root: Path, name: str, *, created_at: str) -> Path:
 
 def _runner(root: Path, *, exit_code: int = 0) -> Path:
     runner = root / "bin" / "options-daily-runner"
+    watchdog = root / "bin" / "options-watchdog-runner"
     runner.parent.mkdir(parents=True, exist_ok=True)
-    runner.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
-    os.chmod(runner, 0o755)
+    for executable in (runner, watchdog):
+        executable.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+        os.chmod(executable, 0o755)
     return runner
 
 
@@ -119,8 +122,10 @@ def test_health_passes_with_current_manifest_env_script_and_runner(tmp_path):
 def test_health_fails_closed_when_runner_or_current_missing(tmp_path):
     health = health_runtime(tmp_path)
     assert health.status == "FAIL"
-    assert "runtime runner missing" in health.issues[0]
-    assert "current release symlink is missing" in health.issues[1]
+    joined = " | ".join(health.issues)
+    assert "runtime runner missing" in joined
+    assert "runtime watchdog runner missing" in joined
+    assert "current release symlink is missing" in joined
 
 
 def test_list_and_prune_preserve_current_previous_and_newest(tmp_path):
@@ -151,7 +156,7 @@ def test_scheduler_binding_requires_hardened_runner_send_and_config(tmp_path):
         b'"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
         b'<plist version="1.0"><dict>'
         b'<key>ProgramArguments</key><array>'
-        + f"<string>{runner.absolute()}</string><string>--send</string><string>--telegram-config</string><string>/tmp/tg.json</string>".encode()
+        + f"<string>{runner.absolute()}</string><string>--scheduled-run</string><string>--send</string><string>--telegram-config</string><string>/tmp/tg.json</string>".encode()
         + b'</array><key>EnvironmentVariables</key><dict><key>PYTHONUNBUFFERED</key><string>1</string></dict>'
         b'</dict></plist>'
     )

@@ -12,6 +12,8 @@ from pathlib import Path
 
 _DEFAULT_LABEL = "com.tradingagents.options-daily"
 _DEFAULT_TIME = "22:00"
+_DEFAULT_WATCHDOG_LABEL = "com.tradingagents.options-watchdog"
+_DEFAULT_WATCHDOG_TIME = "23:00"
 _DEFAULT_HOME = Path.home() / ".tradingagents" / "options-ops"
 _DEFAULT_CREDENTIALS = _DEFAULT_HOME / "telegram_credentials.json"
 _DEFAULT_LOG_DIR = _DEFAULT_HOME / "logs"
@@ -29,6 +31,14 @@ def default_scheduler_label() -> str:
 
 def default_schedule_time() -> str:
     return _DEFAULT_TIME
+
+
+def default_watchdog_label() -> str:
+    return _DEFAULT_WATCHDOG_LABEL
+
+
+def default_watchdog_schedule_time() -> str:
+    return _DEFAULT_WATCHDOG_TIME
 
 
 def default_scheduler_home() -> Path:
@@ -150,6 +160,7 @@ def render_launchd_plist(
             raise ValueError("production scheduler requires a Telegram credential file")
         arguments.extend(
             [
+                "--scheduled-run",
                 "--send",
                 "--telegram-config",
                 str(Path(credential_path).expanduser()),
@@ -168,6 +179,65 @@ def render_launchd_plist(
         "ProcessType": "Background",
         "StandardOutPath": str(logs / "options-daily.out.log"),
         "StandardErrorPath": str(logs / "options-daily.err.log"),
+        "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+    }
+    return plistlib.dumps(payload, sort_keys=True)
+
+
+def render_watchdog_launchd_plist(
+    *,
+    label: str,
+    runner_path: str | os.PathLike[str],
+    runtime_root: str | os.PathLike[str],
+    schedule_time: str,
+    log_dir: str | os.PathLike[str],
+    daily_label: str,
+    daily_launch_agent: str | os.PathLike[str],
+    preview: bool,
+    credential_path: str | os.PathLike[str] | None = None,
+) -> bytes:
+    job_label = str(label).strip()
+    if not job_label:
+        raise ValueError("launchd label must be nonempty")
+    daily_job_label = str(daily_label).strip()
+    if not daily_job_label:
+        raise ValueError("daily launchd label must be nonempty")
+    hour, minute = parse_schedule_time(schedule_time)
+    runner = Path(runner_path).expanduser().absolute()
+    root = Path(runtime_root).expanduser().resolve()
+    logs = Path(log_dir).expanduser().resolve()
+    daily_plist = Path(daily_launch_agent).expanduser().absolute()
+    arguments = [
+        str(runner),
+        "--runtime-root",
+        str(root),
+        "--daily-label",
+        daily_job_label,
+        "--daily-launch-agent",
+        str(daily_plist),
+    ]
+    if not preview:
+        if credential_path is None:
+            raise ValueError("production watchdog requires a Telegram credential file")
+        arguments.extend(
+            [
+                "--send",
+                "--telegram-config",
+                str(Path(credential_path).expanduser()),
+            ]
+        )
+    payload = {
+        "Label": job_label,
+        "ProgramArguments": arguments,
+        "WorkingDirectory": str(root),
+        "StartCalendarInterval": [
+            {"Weekday": weekday, "Hour": hour, "Minute": minute}
+            for weekday in range(1, 6)
+        ],
+        "RunAtLoad": False,
+        "ProcessType": "Background",
+        "StandardOutPath": str(logs / "options-watchdog.out.log"),
+        "StandardErrorPath": str(logs / "options-watchdog.err.log"),
         "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
     }
     return plistlib.dumps(payload, sort_keys=True)

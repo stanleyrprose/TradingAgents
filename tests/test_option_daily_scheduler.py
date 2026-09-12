@@ -6,9 +6,12 @@ import pytest
 
 from tradingagents.option_daily_scheduler import (
     default_schedule_time,
+    default_watchdog_label,
+    default_watchdog_schedule_time,
     load_telegram_credentials,
     parse_schedule_time,
     render_launchd_plist,
+    render_watchdog_launchd_plist,
     save_telegram_credentials,
     write_launchd_plist,
 )
@@ -16,6 +19,8 @@ from tradingagents.option_daily_scheduler import (
 
 def test_default_schedule_is_weekday_us_market_overlap_time():
     assert default_schedule_time() == "22:00"
+    assert default_watchdog_schedule_time() == "23:00"
+    assert default_watchdog_label() == "com.tradingagents.options-watchdog"
 
 
 @pytest.mark.parametrize(
@@ -143,6 +148,7 @@ def test_send_plist_contains_only_credential_path_not_secret(tmp_path):
         )
     )
     args = data["ProgramArguments"]
+    assert "--scheduled-run" in args
     assert "--send" in args
     assert args[args.index("--telegram-config") + 1] == str(credential_path)
     assert "--policy" in args
@@ -170,3 +176,53 @@ def test_write_plist_is_atomic_and_0644(tmp_path):
     assert path.read_bytes() == b"hello"
     if os.name != "nt":
         assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_watchdog_production_plist_uses_hardened_runner_and_secure_config_path(tmp_path):
+    runner = tmp_path / "runtime" / "bin" / "options-watchdog-runner"
+    credential = tmp_path / "telegram.json"
+    daily_plist = tmp_path / "daily.plist"
+    data = plistlib.loads(
+        render_watchdog_launchd_plist(
+            label="com.test.watchdog",
+            runner_path=runner,
+            runtime_root=tmp_path / "runtime",
+            schedule_time="23:00",
+            log_dir=tmp_path / "logs",
+            daily_label="com.test.daily",
+            daily_launch_agent=daily_plist,
+            preview=False,
+            credential_path=credential,
+        )
+    )
+    args = data["ProgramArguments"]
+    assert args[0] == str(runner.absolute())
+    assert "--send" in args
+    assert args[args.index("--telegram-config") + 1] == str(credential)
+    assert args[args.index("--daily-label") + 1] == "com.test.daily"
+    assert data["StartCalendarInterval"] == [
+        {"Weekday": weekday, "Hour": 23, "Minute": 0} for weekday in range(1, 6)
+    ]
+    encoded = plistlib.dumps(data).decode("utf-8")
+    assert "dummy-secret" not in encoded
+
+
+def test_watchdog_preview_plist_contains_no_send_or_credential_path(tmp_path):
+    credential = tmp_path / "secret.json"
+    data = plistlib.loads(
+        render_watchdog_launchd_plist(
+            label="com.test.watchdog",
+            runner_path=tmp_path / "runner",
+            runtime_root=tmp_path / "runtime",
+            schedule_time="23:00",
+            log_dir=tmp_path / "logs",
+            daily_label="com.test.daily",
+            daily_launch_agent=tmp_path / "daily.plist",
+            preview=True,
+            credential_path=credential,
+        )
+    )
+    args = data["ProgramArguments"]
+    assert "--send" not in args
+    assert "--telegram-config" not in args
+    assert str(credential) not in " ".join(args)

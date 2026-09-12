@@ -352,7 +352,9 @@ For unattended macOS operation, the launchd helper stores Telegram credentials s
 ├── envs/<dependency-hash>/venv/  # production-owned dependency environment
 ├── current -> releases/<sha>
 ├── previous -> releases/<sha>
-└── bin/options-daily-runner      # stable launchd entrypoint
+└── bin/
+    ├── options-daily-runner      # stable 22:00 Daily Ops entrypoint
+    └── options-watchdog-runner   # stable 23:00 watchdog entrypoint
 ```
 
 Install only a clean Git revision that matches its configured upstream, validate it, then bind launchd to the stable runtime runner:
@@ -362,12 +364,17 @@ Install only a clean Git revision that matches its configured upstream, validate
 .venv/bin/python scripts/options_runtime.py list
 .venv/bin/python scripts/options_daily_scheduler.py configure-telegram
 .venv/bin/python scripts/options_daily_scheduler.py install
+.venv/bin/python scripts/options_watchdog_scheduler.py install
 .venv/bin/python scripts/options_runtime.py health
 ```
 
 `options_runtime.py install` snapshots `HEAD` with `git archive`, copies the current verified dependency environment into a production-owned venv keyed by a dependency fingerprint, removes the editable TradingAgents link back to the development checkout, makes the release `app/` tree read-only, and atomically switches `current`. Different code revisions with the same Python/dependency set reuse one production environment rather than duplicating it. `options_runtime.py rollback` switches back to `previous` (or `--to <sha-prefix>`), and `options_runtime.py prune --keep 3` removes only inactive old releases while preserving `current` and `previous`.
 
-The production scheduler runs Monday-Friday at **22:00 Mac local time** by default. This time intentionally overlaps regular US equity-option market hours in both US daylight and standard time when the Mac remains on Myanmar time. Daily Ops derives its default market date from `America/New_York`, not the Mac calendar date, and Cboe snapshots fail closed when the source timestamp date does not match that US market date. The scheduler now defaults to the hardened runtime and refuses installation when its stable runner is missing. `install --source-checkout` is retained only for bounded development/launchd smoke tests. `options_runtime.py health` checks the active release, runtime runner, production dependency environment, LaunchAgent binding, SEND mode, credential-file indirection, absence of Telegram secrets in plist environment variables, and whether launchd currently has the production label loaded.
+The production scheduler runs Monday-Friday at **22:00 Mac local time** by default. This time intentionally overlaps regular US equity-option market hours in both US daylight and standard time when the Mac remains on Myanmar time. Daily Ops derives its default market date from `America/New_York`, not the Mac calendar date, and Cboe snapshots fail closed when the source timestamp date does not match that US market date. Standard recurring NYSE full-day holidays are detected locally and short-circuit as `MARKET_CLOSED` without Cboe or Telegram side effects; rare one-off exchange closures remain fail-closed events. Production scheduled runs append a `0600` structured run-history record with market date, timestamps, success/failure, exit code, delivery status, and action count. Manual/preview runs do not write that production history unless `--scheduled-run` is explicitly supplied.
+
+A separate watchdog LaunchAgent runs Monday-Friday at **23:00 Mac local time**. It checks the structured run history, hardened-runtime health, the production Daily Ops plist binding, and whether the Daily Ops launchd label is loaded. Healthy days are silent; missing/failed runs produce a concise Telegram alert through the same secure credential file, with independent alert deduplication. On standard US market holidays the watchdog exits `MARKET_CLOSED` silently. The watchdog itself is launched from a second hardened runtime runner rather than the development checkout, so a broken Daily Ops process cannot self-report as healthy.
+
+The scheduler defaults to the hardened runtime and refuses installation when its stable runner is missing. `install --source-checkout` on the Daily Scheduler is retained only for bounded development/launchd smoke tests. `options_runtime.py health` checks the active release, both runtime runners, production dependency environment, Daily Ops LaunchAgent binding, scheduled-run recording, SEND mode, credential-file indirection, absence of Telegram secrets in plist environment variables, and whether launchd currently has the production Daily Ops label loaded.
 
 Operational commands:
 
@@ -377,7 +384,9 @@ Operational commands:
 .venv/bin/python scripts/options_runtime.py rollback --to <sha-prefix>
 .venv/bin/python scripts/options_runtime.py prune --keep 3
 .venv/bin/python scripts/options_daily_scheduler.py status
+.venv/bin/python scripts/options_watchdog_scheduler.py status
 .venv/bin/python scripts/options_daily_scheduler.py uninstall
+.venv/bin/python scripts/options_watchdog_scheduler.py uninstall
 ```
 
 ## Reproducibility

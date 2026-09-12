@@ -7,8 +7,9 @@ import argparse
 import json
 import os
 import sqlite3
+from contextlib import suppress
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timezone
 
 from tradingagents.dataflows.equity_options import (
     current_us_option_market_date,
@@ -23,6 +24,10 @@ from tradingagents.option_daily_ops import (
     successful_receipt_exists,
 )
 from tradingagents.option_daily_scheduler import load_telegram_credentials
+from tradingagents.option_operations_watchdog import (
+    default_daily_run_history_path,
+    record_daily_run,
+)
 from tradingagents.option_portfolio_dashboard import build_option_portfolio_dashboard
 from tradingagents.option_portfolio_policy import (
     OptionPortfolioRiskPolicy,
@@ -33,6 +38,7 @@ from tradingagents.option_portfolio_policy import (
 )
 from tradingagents.option_position_registry import OptionPositionRegistry
 from tradingagents.telegram_delivery import send_telegram_text
+from tradingagents.us_market_calendar import is_us_equity_market_day
 
 _CREDENTIAL_ENV = "TRADINGAGENTS_" + "TG_" + "BOT_" + "TOKEN"
 _TARGET_ENV = "TRADINGAGENTS_" + "TG_" + "CHAT_" + "ID"
@@ -56,6 +62,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-actions", type=int, default=8, help="maximum action lines in the short brief (1-20)")
     parser.add_argument("--send", action="store_true", help="explicitly enable Telegram delivery")
     parser.add_argument("--force", action="store_true", help="with --send, bypass exact-message receipt deduplication")
+    parser.add_argument(
+        "--scheduled-run",
+        action="store_true",
+        help="record production scheduler completion state for the independent watchdog",
+    )
+    parser.add_argument("--run-history", help="override production scheduled-run history JSON path")
     parser.add_argument("--json", action="store_true", help="emit machine-readable run result")
     return parser
 
@@ -95,15 +107,66 @@ def _payload(brief, delivery, policy_status: str) -> dict:
     }
 
 
+def _market_closed_payload(as_of: date, text: str) -> dict:
+    return {
+        "as_of": as_of.isoformat(),
+        "send_required": False,
+        "action_count": 0,
+        "counts": {
+            "POSITION_EXIT": 0,
+            "POLICY_BREACH": 0,
+            "POLICY_NOT_EVALUABLE": 0,
+            "POSITION_REVIEW": 0,
+        },
+        "policy_status": "MARKET_CLOSED",
+        "fingerprint": None,
+        "brief": text,
+        "delivery": None,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    started_at = datetime.now(timezone.utc)
+    as_of: date | None = None
+    status_line: str | None = None
+    action_count: int | None = None
+    scheduled_recorded = False
     try:
         if args.force and not args.send:
             raise ValueError("--force requires --send")
+        if args.run_history and not args.scheduled_run:
+            raise ValueError("--run-history requires --scheduled-run")
         try:
             as_of = date.fromisoformat(args.date)
         except ValueError as exc:
             raise ValueError("date must be YYYY-MM-DD") from exc
+
+        history_path = args.run_history or default_daily_run_history_path()
+        if not is_us_equity_market_day(as_of):
+            status_line = "MARKET_CLOSED"
+            text = (
+                f"Options Daily {as_of.isoformat()}\n"
+                "US equity-option market is closed; no monitoring run is required."
+            )
+            if args.scheduled_run:
+                record_daily_run(
+                    history_path,
+                    market_date=as_of,
+                    started_at=started_at,
+                    status="SUCCESS",
+                    exit_code=0,
+                    delivery_status=status_line,
+                    action_count=0,
+                )
+                scheduled_recorded = True
+            if args.json:
+                print(json.dumps(_market_closed_payload(as_of, text), indent=2, sort_keys=True))
+            else:
+                print(text)
+                print()
+                print(f"Delivery: {status_line}")
+            return 0
 
         registry = OptionPositionRegistry(args.db)
         positions = registry.list_positions(status="OPEN")
@@ -124,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
             actions,
             max_actions=args.max_actions,
         )
+        action_count = brief.action_count
 
         delivery = None
         if not brief.send_required:
@@ -155,6 +219,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 status_line = "SENT"
 
+        if args.scheduled_run:
+            record_daily_run(
+                history_path,
+                market_date=as_of,
+                started_at=started_at,
+                status="SUCCESS",
+                exit_code=0,
+                delivery_status=status_line,
+                action_count=brief.action_count,
+            )
+            scheduled_recorded = True
+
         if args.json:
             print(json.dumps(_payload(brief, delivery, policy_result.status), indent=2, sort_keys=True))
         else:
@@ -165,6 +241,19 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Provider message ID: {delivery.provider_message_id}")
         return 0
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        if args.scheduled_run and as_of is not None and not scheduled_recorded:
+            history_path = args.run_history or default_daily_run_history_path()
+            with suppress(OSError, ValueError):
+                record_daily_run(
+                    history_path,
+                    market_date=as_of,
+                    started_at=started_at,
+                    status="FAILED",
+                    exit_code=2,
+                    delivery_status=status_line,
+                    action_count=action_count,
+                    error_type=type(exc).__name__,
+                )
         print(f"<option daily operations unavailable: {exc}>")
         return 2
 

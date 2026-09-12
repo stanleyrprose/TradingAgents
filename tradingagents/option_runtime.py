@@ -19,6 +19,7 @@ from pathlib import Path
 _DEFAULT_RUNTIME_ROOT = Path.home() / ".tradingagents" / "options-runtime"
 _MANIFEST_NAME = "release.json"
 _RUNNER_NAME = "options-daily-runner"
+_WATCHDOG_RUNNER_NAME = "options-watchdog-runner"
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,11 @@ def runtime_runner_path(runtime_root: str | os.PathLike[str] | None = None) -> P
     return root / "bin" / _RUNNER_NAME
 
 
+def runtime_watchdog_runner_path(runtime_root: str | os.PathLike[str] | None = None) -> Path:
+    root = Path(runtime_root).expanduser() if runtime_root is not None else default_runtime_root()
+    return root / "bin" / _WATCHDOG_RUNNER_NAME
+
+
 def scheduler_binding_issues(
     *,
     runtime_root: str | os.PathLike[str] | None = None,
@@ -70,6 +76,8 @@ def scheduler_binding_issues(
     else:
         if arguments[0] != expected_runner:
             issues.append("LaunchAgent is not bound to the hardened runtime runner")
+        if "--scheduled-run" not in arguments:
+            issues.append("LaunchAgent does not record scheduled-run health state")
         if "--send" not in arguments:
             issues.append("LaunchAgent is not configured for production SEND mode")
         if "--telegram-config" not in arguments:
@@ -238,17 +246,17 @@ def _read_manifest(release_dir: Path) -> OptionRuntimeRelease:
         raise ValueError(f"invalid runtime manifest: {path}") from exc
 
 
-def _runner_source(runtime_root: Path, base_python: Path) -> str:
+def _runner_source(runtime_root: Path, base_python: Path, script_name: str) -> str:
     root_literal = repr(str(runtime_root))
-    return f"""#!{base_python}\nfrom __future__ import annotations\n\nimport json\nimport os\nimport sys\nfrom pathlib import Path\n\nROOT = Path({root_literal})\ncurrent = (ROOT / 'current').resolve(strict=True)\nmanifest = json.loads((current / 'release.json').read_text(encoding='utf-8'))\nenv_python = ROOT / manifest['env_relpath'] / 'bin' / 'python'\napp = current / 'app'\nscript = app / 'scripts' / 'options_daily_ops.py'\nenvironment = os.environ.copy()\nenvironment['PYTHONPATH'] = str(app)\nenvironment['PYTHONDONTWRITEBYTECODE'] = '1'\nos.chdir(app)\nos.execve(str(env_python), [str(env_python), str(script), *sys.argv[1:]], environment)\n"""
+    script_literal = repr(str(script_name))
+    return f"""#!{base_python}\nfrom __future__ import annotations\n\nimport json\nimport os\nimport sys\nfrom pathlib import Path\n\nROOT = Path({root_literal})\nSCRIPT_NAME = {script_literal}\ncurrent = (ROOT / 'current').resolve(strict=True)\nmanifest = json.loads((current / 'release.json').read_text(encoding='utf-8'))\nenv_python = ROOT / manifest['env_relpath'] / 'bin' / 'python'\napp = current / 'app'\nscript = app / 'scripts' / SCRIPT_NAME\nenvironment = os.environ.copy()\nenvironment['PYTHONPATH'] = str(app)\nenvironment['PYTHONDONTWRITEBYTECODE'] = '1'\nos.chdir(app)\nos.execve(str(env_python), [str(env_python), str(script), *sys.argv[1:]], environment)\n"""
 
 
-def _write_runner(runtime_root: Path, base_python: Path) -> Path:
-    runner = runtime_runner_path(runtime_root)
+def _write_runner(runtime_root: Path, base_python: Path, *, runner: Path, script_name: str) -> Path:
     runner.parent.mkdir(parents=True, exist_ok=True)
     temporary = runner.with_name(f".{runner.name}.tmp-{os.getpid()}")
     try:
-        temporary.write_text(_runner_source(runtime_root, base_python), encoding="utf-8")
+        temporary.write_text(_runner_source(runtime_root, base_python, script_name), encoding="utf-8")
         os.chmod(temporary, 0o755)
         os.replace(temporary, runner)
     finally:
@@ -329,7 +337,18 @@ def install_runtime(
             raise ValueError(f"existing release directory does not match requested runtime: {release}")
 
     base_python = Path(getattr(sys, "_base_executable", sys.executable)).expanduser().absolute()
-    _write_runner(root, base_python)
+    _write_runner(
+        root,
+        base_python,
+        runner=runtime_runner_path(root),
+        script_name="options_daily_ops.py",
+    )
+    _write_runner(
+        root,
+        base_python,
+        runner=runtime_watchdog_runner_path(root),
+        script_name="options_ops_watchdog.py",
+    )
     activate_release(root, release_name)
     return _read_manifest(release)
 
@@ -367,11 +386,14 @@ def health_runtime(runtime_root: str | os.PathLike[str] | None = None) -> Option
     root = Path(runtime_root).expanduser() if runtime_root is not None else default_runtime_root()
     issues: list[str] = []
     runner = runtime_runner_path(root)
+    watchdog_runner = runtime_watchdog_runner_path(root)
     current = root / "current"
     release_name = None
     manifest_path = None
     if not runner.exists() or not os.access(runner, os.X_OK):
         issues.append("runtime runner missing or not executable")
+    if not watchdog_runner.exists() or not os.access(watchdog_runner, os.X_OK):
+        issues.append("runtime watchdog runner missing or not executable")
     if not current.is_symlink():
         issues.append("current release symlink is missing")
     else:
@@ -382,20 +404,29 @@ def health_runtime(runtime_root: str | os.PathLike[str] | None = None) -> Option
             manifest = _read_manifest(release)
             env_python = root / manifest.env_relpath / "bin" / "python"
             script = release / "app" / "scripts" / "options_daily_ops.py"
+            watchdog_script = release / "app" / "scripts" / "options_ops_watchdog.py"
             if not env_python.exists():
                 issues.append("runtime environment Python is missing")
             if not script.exists():
                 issues.append("runtime daily-ops script is missing")
-            if runner.exists() and not issues:
-                result = subprocess.run(
-                    [str(runner), "--help"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if result.returncode != 0:
-                    issues.append(f"runtime runner smoke failed with exit code {result.returncode}")
+            if not watchdog_script.exists():
+                issues.append("runtime watchdog script is missing")
+            if runner.exists() and watchdog_runner.exists() and not issues:
+                for name, executable in (
+                    ("daily", runner),
+                    ("watchdog", watchdog_runner),
+                ):
+                    result = subprocess.run(
+                        [str(executable), "--help"],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if result.returncode != 0:
+                        issues.append(
+                            f"runtime {name} runner smoke failed with exit code {result.returncode}"
+                        )
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             issues.append(f"runtime health error: {type(exc).__name__}")
     return OptionRuntimeHealth(

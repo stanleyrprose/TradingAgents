@@ -312,3 +312,92 @@ def test_partial_environment_configuration_fails_closed_even_with_file(tmp_path,
     assert "environment configuration is incomplete" in output
     assert "partial-secret" not in output
     assert "file-secret" not in output
+
+
+def test_scheduled_run_records_success_history(tmp_path, capsys):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry, with_exit_policy=False)
+    history = tmp_path / "run-history.json"
+    with patch.object(
+        module, "fetch_equity_option_snapshots", return_value={CALL: _snapshot()}
+    ):
+        rc = module.main(
+            [
+                "--db",
+                str(registry.path),
+                "--date",
+                TODAY.isoformat(),
+                "--scheduled-run",
+                "--run-history",
+                str(history),
+            ]
+        )
+    assert rc == 0
+    assert "Delivery: NO_ACTIONS" in capsys.readouterr().out
+    payload = json.loads(history.read_text())
+    assert payload["runs"][-1]["market_date"] == TODAY.isoformat()
+    assert payload["runs"][-1]["status"] == "SUCCESS"
+    assert payload["runs"][-1]["exit_code"] == 0
+    assert payload["runs"][-1]["delivery_status"] == "NO_ACTIONS"
+
+
+def test_scheduled_run_records_failure_history(tmp_path, capsys):
+    module = _load_script()
+    registry = _registry(tmp_path)
+    _open(registry)
+    history = tmp_path / "run-history.json"
+    with patch.object(module, "fetch_equity_option_snapshots", side_effect=RuntimeError("boom")):
+        rc = module.main(
+            [
+                "--db",
+                str(registry.path),
+                "--date",
+                TODAY.isoformat(),
+                "--scheduled-run",
+                "--run-history",
+                str(history),
+            ]
+        )
+    assert rc == 2
+    assert "unavailable" in capsys.readouterr().out
+    payload = json.loads(history.read_text())
+    assert payload["runs"][-1]["status"] == "FAILED"
+    assert payload["runs"][-1]["exit_code"] == 2
+    assert payload["runs"][-1]["error_type"] == "RuntimeError"
+
+
+def test_market_closed_short_circuits_before_registry_network_and_credentials(tmp_path, capsys):
+    module = _load_script()
+    history = tmp_path / "run-history.json"
+    with (
+        patch.object(module, "OptionPositionRegistry") as registry,
+        patch.object(module, "fetch_equity_option_snapshots") as fetch,
+        patch.object(module, "send_telegram_text") as send,
+    ):
+        rc = module.main(
+            [
+                "--date",
+                "2026-11-26",
+                "--send",
+                "--scheduled-run",
+                "--run-history",
+                str(history),
+            ]
+        )
+    assert rc == 0
+    registry.assert_not_called()
+    fetch.assert_not_called()
+    send.assert_not_called()
+    assert "Delivery: MARKET_CLOSED" in capsys.readouterr().out
+    payload = json.loads(history.read_text())
+    assert payload["runs"][-1]["delivery_status"] == "MARKET_CLOSED"
+
+
+def test_run_history_override_requires_explicit_scheduled_run(tmp_path, capsys):
+    module = _load_script()
+    with patch.object(module, "fetch_equity_option_snapshots") as fetch:
+        rc = module.main(["--run-history", str(tmp_path / "history.json")])
+    assert rc == 2
+    fetch.assert_not_called()
+    assert "--run-history requires --scheduled-run" in capsys.readouterr().out
