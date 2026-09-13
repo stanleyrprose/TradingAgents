@@ -50,6 +50,17 @@ class CryptoAssetModeTests(unittest.TestCase):
         )
 
         self.assertEqual(state["asset_type"], AssetType.CRYPTO.value)
+        self.assertEqual(state["analysis_symbol"], "BTC-USD")
+
+    def test_propagator_stores_requested_instrument_and_explicit_proxy(self):
+        state = Propagator().create_initial_state(
+            "AAPL260918C00200000",
+            "2026-09-10",
+            analysis_symbol="AAPL",
+        )
+
+        self.assertEqual(state["company_of_interest"], "AAPL260918C00200000")
+        self.assertEqual(state["analysis_symbol"], "AAPL")
 
 
 if __name__ == "__main__":

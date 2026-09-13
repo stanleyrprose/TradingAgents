@@ -2,7 +2,77 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows.cftc_positioning import fetch_cftc_positioning
+from tradingagents.dataflows.eia_inventory import fetch_eia_inventory
+from tradingagents.dataflows.futures_curve import fetch_futures_curve
 from tradingagents.dataflows.interface import route_to_vendor
+from tradingagents.instrument_router import classify_instrument
+
+_FOREX_RATE_PROXIES = {
+    "USD": "FEDFUNDS",
+    "EUR": "ECBMRRFR",
+    "GBP": "IR3TIB01GBM156N",
+    "JPY": "IR3TIB01JPM156N",
+    "CHF": "IR3TIB01CHM156N",
+    "CAD": "IR3TIB01CAM156N",
+    "AUD": "IR3TIB01AUM156N",
+    "NZD": "IRSTCI01NZM156N",
+    "CNY": "IRSTCI01CNM156N",
+    "CNH": "IRSTCI01CNM156N",
+}
+
+_FX_FUTURES_CURRENCIES = {
+    "6E=F": "EUR",
+    "6J=F": "JPY",
+    "6B=F": "GBP",
+    "6A=F": "AUD",
+    "6C=F": "CAD",
+    "6S=F": "CHF",
+}
+_INDEX_FUTURES_DRIVERS = {
+    "ES=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+    "NQ=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+    "YM=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+    "RTY=F": ("FEDFUNDS", "DGS10", "VIXCLS"),
+}
+_TREASURY_FUTURES_DRIVERS = {
+    "ZB=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+    "ZN=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+    "ZF=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+    "ZT=F": ("FEDFUNDS", "DGS2", "DGS10", "DGS30"),
+}
+
+_COMMODITY_DRIVER_BASKETS = {
+    "CL=F": ("DCOILWTICO", "DTWEXBGS", "DGS10", "INDPRO"),
+    "BZ=F": ("DCOILBRENTEU", "DTWEXBGS", "DGS10", "INDPRO"),
+    "NG=F": ("DHHNGSP", "DTWEXBGS", "INDPRO"),
+    "GC=F": ("DTWEXBGS", "DGS10", "T10YIE"),
+    "SI=F": ("DTWEXBGS", "DGS10", "T10YIE"),
+    "PL=F": ("DTWEXBGS", "DGS10", "T10YIE"),
+    "PA=F": ("DTWEXBGS", "DGS10", "T10YIE"),
+    "HG=F": ("DTWEXBGS", "DGS10", "INDPRO"),
+}
+_DEFAULT_COMMODITY_DRIVERS = ("DTWEXBGS", "CPIAUCSL", "INDPRO")
+
+
+def _fetch_series(series_id: str, curr_date: str, look_back_days: int | None) -> str:
+    """Fetch one series without allowing optional context to abort the tool."""
+    try:
+        return route_to_vendor(
+            "get_macro_indicators", series_id, curr_date, look_back_days
+        )
+    except Exception:
+        return "DATA_UNAVAILABLE"
+
+
+def _render_series(
+    sources: list[tuple[str, str]], curr_date: str, look_back_days: int | None
+) -> str:
+    sections = []
+    for label, series_id in sources:
+        report = _fetch_series(series_id, curr_date, look_back_days)
+        sections.append(f"### {label} ({series_id})\n{report}")
+    return "\n\n".join(sections)
 
 
 @tool
@@ -34,3 +104,147 @@ def get_macro_indicators(
         str: A formatted markdown report of the macro series
     """
     return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+
+
+@tool
+def get_cross_asset_context(
+    ticker: str, curr_date: str, look_back_days: int | None = 180
+) -> str:
+    """Return macro context for supported cross-asset instruments."""
+    profile = classify_instrument(ticker)
+
+    if profile.asset_class == "forex" and profile.instrument_kind == "future":
+        symbol = profile.canonical_symbol
+        currency = _FX_FUTURES_CURRENCIES.get(symbol)
+        if currency is not None:
+            series_ids = (_FOREX_RATE_PROXIES[currency], "FEDFUNDS", "DTWEXBGS")
+            sources = []
+            seen_series = set()
+            for label, series_id in (
+                (f"{currency} rate proxy", series_ids[0]),
+                ("US policy-rate proxy", series_ids[1]),
+                ("Trade-weighted US dollar", series_ids[2]),
+            ):
+                if series_id not in seen_series:
+                    seen_series.add(series_id)
+                    sources.append((label, series_id))
+
+            header = (
+                f"## Cross-asset FX futures context: {symbol}\n"
+                "These policy/money-market rates are macro proxies, not exact OTC "
+                "forward points or realized carry. International series may lag; "
+                "observation dates matter."
+            )
+            fred_context = (
+                f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+            )
+            return (
+                f"{fred_context}\n\n## CFTC positioning\n"
+                f"{fetch_cftc_positioning(ticker, curr_date)}\n\n## Futures curve\n"
+                f"{fetch_futures_curve(ticker, curr_date)}"
+            )
+
+    if profile.asset_class == "forex":
+        pair = profile.canonical_symbol.removesuffix("=X")
+        base, quote = pair[:3], pair[3:6]
+        notes = []
+        sources = []
+        seen_series = set()
+
+        for role, currency in (("Base", base), ("Quote", quote)):
+            series_id = _FOREX_RATE_PROXIES.get(currency)
+            if series_id is None:
+                notes.append(f"{role} currency {currency}: no rate proxy is mapped.")
+                continue
+            if currency == "CNH":
+                notes.append(
+                    "CNH uses the CNY rate proxy IRSTCI01CNM156N; it is not an "
+                    "offshore-CNH-specific rate series."
+                )
+            if series_id in seen_series:
+                notes.append(
+                    f"{role} currency {currency} shares the already listed "
+                    f"{series_id} proxy."
+                )
+                continue
+            seen_series.add(series_id)
+            sources.append((f"{role} {currency} rate proxy", series_id))
+
+        if "DTWEXBGS" not in seen_series:
+            sources.append(("Trade-weighted US dollar", "DTWEXBGS"))
+
+        header = (
+            f"## Cross-asset forex context: {profile.canonical_symbol}\n"
+            "These policy/money-market series are rate proxies, not exact forward "
+            "carry. International series may lag; observation dates matter."
+        )
+        note_text = "" if not notes else "\n\n" + "\n".join(f"- {note}" for note in notes)
+        fred_context = (
+            f"{header}{note_text}\n\n"
+            f"{_render_series(sources, curr_date, look_back_days)}"
+        )
+        return (
+            f"{fred_context}\n\n## CFTC positioning\n"
+            f"{fetch_cftc_positioning(ticker, curr_date)}"
+        )
+
+    if profile.instrument_kind == "future" and profile.asset_class == "index":
+        symbol = profile.analysis_symbol
+        series_ids = _INDEX_FUTURES_DRIVERS.get(symbol)
+        if series_ids is not None:
+            sources = [("Macro driver", series_id) for series_id in series_ids]
+            header = f"## Cross-asset index futures context: {symbol}"
+            fred_context = (
+                f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+            )
+            return (
+                f"{fred_context}\n\n## Futures curve\n"
+                f"{fetch_futures_curve(ticker, curr_date)}"
+            )
+
+    if (
+        profile.instrument_kind == "future"
+        and profile.asset_class == "fixed_income"
+    ):
+        symbol = profile.analysis_symbol
+        series_ids = _TREASURY_FUTURES_DRIVERS.get(symbol)
+        if series_ids is not None:
+            sources = [("Rate context", series_id) for series_id in series_ids]
+            header = (
+                f"## Cross-asset U.S. Treasury futures context: {symbol}\n"
+                "These series provide macro/rate context; they do not solve "
+                "cheapest-to-deliver (CTD), delivery-basket, cash-bond basis, or "
+                "fair-value analytics."
+            )
+            fred_context = (
+                f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+            )
+            return (
+                f"{fred_context}\n\n## Futures curve\n"
+                f"{fetch_futures_curve(ticker, curr_date)}"
+            )
+
+    if profile.asset_class == "commodity":
+        symbol = profile.analysis_symbol
+        series_ids = _COMMODITY_DRIVER_BASKETS.get(
+            symbol, _DEFAULT_COMMODITY_DRIVERS
+        )
+        sources = [("Driver", series_id) for series_id in series_ids]
+        header = (
+            f"## Cross-asset commodity context: {symbol}\n"
+            "Official weekly EIA energy inventory and a Yahoo futures-curve snapshot may "
+            "be provided below. Comprehensive physical supply-demand, cash basis, and "
+            "cost-of-carry fair value remain unavailable."
+        )
+        fred_context = f"{header}\n\n{_render_series(sources, curr_date, look_back_days)}"
+        return (
+            f"{fred_context}\n\n## CFTC positioning\n"
+            f"{fetch_cftc_positioning(ticker, curr_date)}\n\n## EIA inventory\n"
+            f"{fetch_eia_inventory(ticker, curr_date)}\n\n## Futures curve\n"
+            f"{fetch_futures_curve(ticker, curr_date)}"
+        )
+
+    return (
+        f"NOT_APPLICABLE: {profile.canonical_symbol} is not a supported cross-asset "
+        "instrument."
+    )

@@ -3,6 +3,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     opponent_argument_or_opening,
 )
+from tradingagents.instrument_router import classify_instrument
 
 
 def create_bull_researcher(llm):
@@ -19,15 +20,15 @@ def create_bull_researcher(llm):
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         instrument_context = get_instrument_context_from_state(state)
-        asset_type = state.get("asset_type", "stock")
-        target_label = "stock" if asset_type == "stock" else "asset"
-        fundamentals_label = (
-            "Company fundamentals report"
-            if asset_type == "stock"
-            else "Asset fundamentals report (may be unavailable for crypto)"
+        profile = classify_instrument(state["company_of_interest"])
+        is_ordinary_equity = (
+            profile.primary_type == "stock"
+            and profile.asset_class == "equity"
+            and profile.instrument_kind == "stock"
         )
 
-        prompt = f"""You are a Bull Analyst advocating for investing in the {target_label}. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
+        if is_ordinary_equity:
+            prompt = f"""You are a Bull Analyst advocating for investing in the stock. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
 
 Key points to focus on:
 - Growth Potential: Highlight the company's market opportunities, revenue projections, and scalability.
@@ -41,11 +42,33 @@ Resources available:
 Market research report: {market_research_report}
 Social media sentiment report: {sentiment_report}
 Latest world affairs news: {news_report}
-{fundamentals_label}: {fundamentals_report}
+Company fundamentals report: {fundamentals_report}
 Conversation history of the debate: {history}
 Last bear argument: {current_response}
 Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position.
-""" + get_language_instruction()
+"""
+        else:
+            prompt = f"""You are a Bull Analyst advocating for a long position in the market instrument. Build a strong, evidence-based case without assuming it is a company.
+
+Key points to focus on:
+- Macro and Flow Drivers: Explain the macro regime, cross-asset relationships, liquidity, and flows that support the bullish case.
+- Market Structure and Positioning: Discuss positioning, flows, or market structure only where the reports provide evidence; do not invent unavailable data.
+- Price Behavior: Evaluate trend, momentum, and volatility, including how they affect upside potential and risk.
+- Catalysts and Invalidation: Identify concrete bullish catalysts, key levels, and conditions that would invalidate the thesis.
+- Direct Rebuttal: Engage directly with the bear analyst's claims using specific evidence, or open with your own case when the bear has not spoken.
+
+Resources available:
+{instrument_context}
+Market research report: {market_research_report}
+Social media sentiment report: {sentiment_report}
+Latest world affairs news: {news_report}
+Contextual/fundamental report (may be unavailable or not applicable): {fundamentals_report}
+Conversation history of the debate: {history}
+Last bear argument: {current_response}
+Use this information to present the bullish thesis, its catalysts, its invalidation conditions, and a direct rebuttal of the bear case.
+"""
+
+        prompt += get_language_instruction()
 
         response = llm.invoke(prompt)
 

@@ -56,40 +56,34 @@ def test_in_window_undated_excluded_in_backtest_kept_live():
 
 # --- StockTwits -------------------------------------------------------------
 
-def _msg(created_iso, sentiment=None):
-    return {
-        "created_at": created_iso,
-        "user": {"username": "u"},
-        "entities": {"sentiment": {"basic": sentiment}},
-        "body": "text",
-    }
-
-
 @pytest.mark.unit
-def test_stocktwits_historical_window_excludes_recent(monkeypatch):
-    # All messages are "today"; a run as-of a past week must show none of them.
-    recent = [_msg("2026-08-30T12:00:00Z", "Bullish"), _msg("2026-08-29T09:00:00Z")]
-    monkeypatch.setattr(stocktwits, "urlopen", lambda *a, **k: _JsonResp({"messages": recent}))
-    out = stocktwits.fetch_stocktwits_messages("AAPL", start_date="2026-05-01", end_date="2026-05-08")
-    assert "no StockTwits messages" in out
+def test_stocktwits_historical_window_never_uses_current_sentiment(monkeypatch):
+    monkeypatch.setenv("STOCKTWITS_USERNAME", "user")
+    monkeypatch.setenv("STOCKTWITS_PASSWORD", "pass")
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            stocktwits,
+            "urlopen",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("historical StockTwits request should not hit network")
+            ),
+        )
+        out = stocktwits.fetch_stocktwits_messages(
+            "AAPL",
+            start_date="2026-05-01",
+            end_date="2026-05-08",
+        )
+    assert "no StockTwits sentiment" in out
     assert "2026-05-01..2026-05-08" in out
-    assert "Bullish: 1" not in out  # the recent bullish message did not leak
+    assert "current-state only" in out
 
 
 @pytest.mark.unit
-def test_stocktwits_live_window_keeps_in_range(monkeypatch):
-    msgs = [_msg("2026-05-05T12:00:00Z", "Bullish"), _msg("2026-05-07T09:00:00Z", "Bearish")]
-    monkeypatch.setattr(stocktwits, "urlopen", lambda *a, **k: _JsonResp({"messages": msgs}))
-    out = stocktwits.fetch_stocktwits_messages("AAPL", start_date="2026-05-01", end_date="2026-05-08")
-    assert "Total: 2" in out
-
-
-@pytest.mark.unit
-def test_stocktwits_no_window_is_unfiltered(monkeypatch):
-    msgs = [_msg("2026-08-30T12:00:00Z", "Bullish")]
-    monkeypatch.setattr(stocktwits, "urlopen", lambda *a, **k: _JsonResp({"messages": msgs}))
-    out = stocktwits.fetch_stocktwits_messages("AAPL")  # live caller, no dates
-    assert "Total: 1" in out
+def test_stocktwits_live_call_requires_official_credentials(monkeypatch):
+    monkeypatch.delenv("STOCKTWITS_USERNAME", raising=False)
+    monkeypatch.delenv("STOCKTWITS_PASSWORD", raising=False)
+    out = stocktwits.fetch_stocktwits_messages("AAPL")
+    assert "official API credentials not configured" in out
 
 
 # --- Reddit -----------------------------------------------------------------

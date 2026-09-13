@@ -49,6 +49,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.instrument_router import classify_instrument
 from tradingagents.reporting import write_report_tree
 
 console = Console()
@@ -554,6 +555,7 @@ def get_user_selections():
         )
     )
     selected_ticker = get_ticker()
+    profile = classify_instrument(selected_ticker)
     asset_type = detect_asset_type(selected_ticker)
     # Only announce when it's not the default stock path, to avoid printing
     # "stock" on every run.
@@ -726,6 +728,8 @@ def get_user_selections():
 
     return {
         "ticker": selected_ticker,
+        "requested_ticker": profile.canonical_symbol,
+        "analysis_symbol": profile.analysis_symbol,
         "asset_type": asset_type.value,
         "analysis_date": analysis_date,
         "analysts": selected_analysts,
@@ -1004,6 +1008,8 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
 def run_analysis(checkpoint: bool | None = None):
     # First get all user selections
     selections = get_user_selections()
+    requested_ticker = selections.get("requested_ticker", selections["ticker"])
+    analysis_symbol = selections.get("analysis_symbol", requested_ticker)
 
     config = _build_run_config(selections, checkpoint)
 
@@ -1031,7 +1037,7 @@ def run_analysis(checkpoint: bool | None = None):
     start_time = time.time()
 
     # Create result directory
-    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
+    results_dir = Path(config["results_dir"]) / requested_ticker / selections["analysis_date"]
     results_dir.mkdir(parents=True, exist_ok=True)
     report_dir = results_dir / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -1115,13 +1121,16 @@ def run_analysis(checkpoint: bool | None = None):
         # the real company (#814); the CLI builds state directly rather than
         # going through propagate(), so this must happen on the CLI path too.
         instrument_context = graph.resolve_instrument_context(
-            selections["ticker"], selections["asset_type"]
+            requested_ticker,
+            selections["asset_type"],
+            analysis_symbol=analysis_symbol,
         )
         init_agent_state = graph.propagator.create_initial_state(
-            selections["ticker"],
+            requested_ticker,
             selections["analysis_date"],
             asset_type=selections["asset_type"],
             instrument_context=instrument_context,
+            analysis_symbol=analysis_symbol,
         )
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)
@@ -1131,7 +1140,7 @@ def run_analysis(checkpoint: bool | None = None):
         # actually saves and resumes on the CLI path (#1249); a no-op when
         # checkpointing is disabled. Torn down in the finally below.
         checkpoint_tid = graph.begin_checkpoint(
-            selections["ticker"], selections["analysis_date"], selections["asset_type"]
+            requested_ticker, selections["analysis_date"], selections["asset_type"]
         )
         if checkpoint_tid is not None:
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = checkpoint_tid
@@ -1246,7 +1255,7 @@ def run_analysis(checkpoint: bool | None = None):
             # Clean run: drop this run's checkpoint so a later run starts fresh.
             # A mid-stream failure skips this, keeping the checkpoint for resume.
             graph.clear_checkpoint_on_success(
-                selections["ticker"], selections["analysis_date"], selections["asset_type"]
+                requested_ticker, selections["analysis_date"], selections["asset_type"]
             )
         finally:
             # Always restore the plain uncheckpointed graph, even on failure.
@@ -1282,14 +1291,14 @@ def run_analysis(checkpoint: bool | None = None):
     save_choice = typer.prompt("Save report?", default="Y").strip().upper()
     if save_choice in ("Y", "YES", ""):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_path = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
+        default_path = Path.cwd() / "reports" / f"{requested_ticker}_{timestamp}"
         save_path_str = typer.prompt(
             "Save path (press Enter for default)",
             default=str(default_path)
         ).strip()
         save_path = Path(save_path_str)
         try:
-            report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
+            report_file = save_report_to_disk(final_state, requested_ticker, save_path)
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
             console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
         except Exception as e:

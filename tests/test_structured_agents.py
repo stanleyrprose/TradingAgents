@@ -443,6 +443,8 @@ class TestSentimentAnalystAgent:
 
         monkeypatch.setattr(sentiment, "fetch_stocktwits_messages", lambda *a, **k: "st")
         monkeypatch.setattr(sentiment, "fetch_reddit_posts", lambda *a, **k: "rd")
+        monkeypatch.setattr(sentiment, "fetch_crypto_fear_greed", lambda *a, **k: "fg")
+        monkeypatch.setattr(sentiment, "fetch_deribit_options_sentiment", lambda *a, **k: "di")
         monkeypatch.setattr(sentiment.get_news, "func", lambda *a, **k: "news", raising=False)
 
     def test_structured_path_produces_rendered_markdown(self):
@@ -468,6 +470,23 @@ class TestSentimentAnalystAgent:
         captured = {}
         create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
         assert any("NVDA" in str(m) for m in captured["prompt"])
+
+    def test_crypto_prompt_contains_crypto_provider_blocks(self):
+        captured = {}
+        state = _make_sentiment_state() | {
+            "company_of_interest": "BTC-USD", "asset_type": "crypto"
+        }
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(state)
+        text = "\n".join(str(m) for m in captured["prompt"])
+        assert "fg" in text
+        assert "di" in text
+
+    def test_stock_prompt_marks_crypto_providers_not_applicable(self):
+        captured = {}
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
+        text = "\n".join(str(m) for m in captured["prompt"])
+        assert "<crypto fear-greed not applicable: non-crypto instrument>" in text
+        assert "<deribit options not applicable: non-crypto instrument>" in text
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain = "**Overall Sentiment:** **Bearish** (Score: 3.0/10)\n**Confidence:** Low\n\nLimited data."

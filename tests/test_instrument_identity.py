@@ -13,6 +13,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     resolve_instrument_identity,
 )
+from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 
 @pytest.mark.unit
@@ -95,6 +96,19 @@ class BuildInstrumentContextTests(unittest.TestCase):
         self.assertIn("Name: Bitcoin USD", context)
         self.assertIn("crypto asset rather than a company", context)
 
+    def test_proxy_distinguishes_requested_option_from_underlying(self):
+        context = build_instrument_context(
+            "AAPL260918C00200000",
+            "stock",
+            {"company_name": "Apple Inc."},
+            analysis_symbol="AAPL",
+        )
+        self.assertIn("exact requested ticker `AAPL260918C00200000`", context)
+        self.assertIn("market-data analysis proxy/underlying is `AAPL`", context)
+        self.assertIn("contract-specific tools and final recommendations", context)
+        self.assertIn("only for underlying OHLCV, technical, and news tools", context)
+        self.assertIn("Do not conflate the contract and underlying", context)
+        self.assertNotIn("exact ticker in every tool call", context)
 
 @pytest.mark.unit
 class GetInstrumentContextFromStateTests(unittest.TestCase):
@@ -116,6 +130,77 @@ class GetInstrumentContextFromStateTests(unittest.TestCase):
             {"company_of_interest": "BTC-USD", "asset_type": "crypto"}
         )
         self.assertIn("crypto asset", context)
+
+    def test_fallback_uses_analysis_proxy(self):
+        context = get_instrument_context_from_state(
+            {
+                "company_of_interest": "AAPL260918C00200000",
+                "analysis_symbol": "AAPL",
+                "asset_type": "stock",
+            }
+        )
+        self.assertIn("exact requested ticker `AAPL260918C00200000`", context)
+        self.assertIn("market-data analysis proxy/underlying is `AAPL`", context)
+
+
+@pytest.mark.unit
+def test_graph_resolves_proxy_identity_but_builds_context_for_requested_ticker():
+    identity = {"company_name": "Apple Inc."}
+    with patch(
+        "tradingagents.graph.trading_graph.resolve_instrument_identity",
+        return_value=identity,
+    ) as resolver, patch(
+        "tradingagents.graph.trading_graph.build_instrument_context",
+        return_value="CONTEXT",
+    ) as builder:
+        context = TradingAgentsGraph.resolve_instrument_context(
+            object(),
+            "AAPL260918C00200000",
+            "stock",
+            analysis_symbol="AAPL",
+        )
+
+    assert context == "CONTEXT"
+    resolver.assert_called_once_with("AAPL")
+    builder.assert_called_once_with(
+        "AAPL260918C00200000",
+        "stock",
+        identity,
+        analysis_symbol="AAPL",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ticker", "name", "asset_class", "instrument_kind"),
+    [
+        ("EURUSD=X", "EUR/USD", "forex", "spot"),
+        ("GC=F", "Gold Futures", "commodity", "future"),
+    ],
+)
+def test_cross_asset_identity_is_not_described_as_a_company(
+    ticker, name, asset_class, instrument_kind
+):
+    context = build_instrument_context(
+        ticker,
+        "stock",
+        {
+            "company_name": name,
+            "sector": "Fake Sector",
+            "industry": "Fake Industry",
+            "exchange": "CCY",
+        },
+    )
+
+    assert "market instrument" in context
+    assert f"primary_type={asset_class}" in context
+    assert f"asset_class={asset_class}" in context
+    assert f"instrument_kind={instrument_kind}" in context
+    assert f"Name: {name}" in context
+    assert "Company:" not in context
+    assert "Business classification:" not in context
+    assert "Fake Sector" not in context
+    assert "company fundamentals must not be assumed" in context
 
 
 @pytest.mark.unit

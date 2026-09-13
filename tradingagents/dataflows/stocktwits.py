@@ -1,67 +1,117 @@
-"""StockTwits public symbol-stream fetcher.
+"""Official StockTwits sentiment provider.
 
-StockTwits exposes a per-symbol message stream at
-``api.stocktwits.com/api/2/streams/symbol/{ticker}.json`` that requires no
-API key, no OAuth, and no registration. Each message includes a
-user-labeled sentiment field (``Bullish``/``Bearish``/null), the message
-body, timestamp, and posting user.
+TradingAgents uses StockTwits' authenticated Firestream Sentiment V2 endpoint
+when credentials are configured. The former unauthenticated per-symbol stream is
+not used as an automated fallback: it now commonly returns HTTP 403 and current
+StockTwits terms require automated access to use an approved API.
 
-The function is deliberately self-contained: short timeout, graceful
-degradation on any HTTP or parse failure, and a string return type so
-the calling agent gets a uniform interface regardless of whether the
-network call succeeded.
+Credentials are read from ``STOCKTWITS_USERNAME`` and
+``STOCKTWITS_PASSWORD``. They are used only to build the HTTP Basic
+Authorization header and are never logged.
+
+The public function keeps its historical ``fetch_stocktwits_messages`` name for
+call-site compatibility, but the preferred official source returns aggregate
+sentiment and message-volume metrics rather than individual post bodies.
 """
 
 from __future__ import annotations
 
-import contextlib
+import base64
 import http.client
 import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
-from .date_window import in_window
 from .symbol_utils import crypto_base
 
 logger = logging.getLogger(__name__)
 
-_API = "https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
-_UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
-
-
-def _within_window(messages, start_date, end_date):
-    """Keep only messages published in [start_date, end_date] (look-ahead safe).
-
-    No window (both None) leaves the list untouched for live callers. A message
-    whose ``created_at`` (ISO 8601) is unparseable is dropped in a historical
-    window, since we can't prove it isn't from after the as-of date (#1220).
-    """
-    if not (start_date and end_date):
-        return messages
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    kept = []
-    for m in messages:
-        created = None
-        raw = m.get("created_at")
-        if raw:
-            with contextlib.suppress(ValueError, TypeError):
-                created = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if in_window(created, start_dt, end_dt):
-            kept.append(m)
-    return kept
+_SENTIMENT_API = (
+    "https://api-gw-prd.stocktwits.com/api-middleware/external/"
+    "sentiment/v2/{ticker}/detail"
+)
+_UA = "tradingagents/0.4 (+https://github.com/TauricResearch/TradingAgents)"
 
 
 def _stocktwits_symbol(ticker: str) -> str:
-    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention.
-
-    StockTwits lists crypto as ``BTC.X`` (Yahoo's ``BTC-USD`` form 404s), so any
-    crypto symbol resolves to its base plus ``.X``; other symbols pass through
-    upper-cased.
-    """
+    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention."""
     base = crypto_base(ticker)
     return f"{base}.X" if base else ticker.strip().upper()
+
+
+def _firestream_credentials() -> tuple[str, str] | None:
+    """Return configured Firestream credentials without logging them."""
+    username = os.getenv("STOCKTWITS_USERNAME")
+    password = os.getenv("STOCKTWITS_PASSWORD")
+    if username and password:
+        return username, password
+    return None
+
+
+def _fetch_authenticated_sentiment(ticker: str, timeout: float) -> str | None:
+    """Fetch and format official StockTwits aggregate sentiment."""
+    credentials = _firestream_credentials()
+    if credentials is None:
+        return None
+
+    username, password = credentials
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    symbol = _stocktwits_symbol(ticker)
+    url = _SENTIMENT_API.format(ticker=symbol)
+    req = Request(
+        url,
+        headers={
+            "User-Agent": _UA,
+            "Accept": "application/json",
+            "Authorization": f"Basic {token}",
+        },
+    )
+
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Authenticated StockTwits sentiment failed for %s: %s",
+            ticker,
+            type(exc).__name__,
+        )
+        return None
+
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    sentiment = data.get("sentiment", {}) if isinstance(data, dict) else {}
+    volume = data.get("messageVolume", {}) if isinstance(data, dict) else {}
+    timeframes = data.get("timeframes", {}) if isinstance(data, dict) else {}
+    if not sentiment and not timeframes:
+        return None
+
+    lines = [
+        f"Official StockTwits sentiment for ${symbol} "
+        "(authenticated Firestream)"
+    ]
+    for period in ("now", "15m", "24h"):
+        sent = sentiment.get(period, {}) if isinstance(sentiment, dict) else {}
+        vol = volume.get(period, {}) if isinstance(volume, dict) else {}
+        if sent or vol:
+            lines.append(
+                f"{period}: sentiment={sent.get('labelNormalized', 'NA')} "
+                f"({sent.get('valueNormalized', 'NA')}), "
+                f"message_volume={vol.get('labelNormalized', 'NA')} "
+                f"({vol.get('valueNormalized', 'NA')})"
+            )
+
+    for period in ("1D", "1W", "1M"):
+        frame = timeframes.get(period, {}) if isinstance(timeframes, dict) else {}
+        sent = frame.get("sentiment", {}) if isinstance(frame, dict) else {}
+        if sent:
+            lines.append(
+                f"{period}: sentiment={sent.get('labelNormalized', 'NA')} "
+                f"({sent.get('valueNormalized', 'NA')})"
+            )
+
+    return "\n".join(lines)
 
 
 def fetch_stocktwits_messages(
@@ -71,69 +121,28 @@ def fetch_stocktwits_messages(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> str:
-    """Fetch recent StockTwits messages for ``ticker`` and return them as a
-    formatted plaintext block ready for prompt injection.
+    """Return current StockTwits aggregate sentiment for ``ticker``.
 
-    When ``start_date``/``end_date`` (yyyy-mm-dd) are given, messages are trimmed
-    to that window. The StockTwits public stream only serves recent messages, so
-    for a historical run they all fall after the window and a clear placeholder
-    is returned rather than leaking today's chatter into a backtest (#1220).
-
-    Returns a placeholder string when the endpoint is unreachable, the
-    symbol has no messages, or the response shape is unexpected — the
-    caller never has to special-case None or exceptions.
+    The official Sentiment V2 detail endpoint is current-state data. Historical
+    windows therefore return a placeholder instead of leaking today's sentiment
+    into a backtest. ``limit`` is retained for API compatibility with existing
+    TradingAgents call sites.
     """
-    url = _API.format(ticker=_stocktwits_symbol(ticker))
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-        # OSError covers URLError/TimeoutError/connection resets; HTTPException
-        # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
-        logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
-        return f"<stocktwits unavailable: {type(exc).__name__}>"
+    del limit
 
-    messages = data.get("messages", []) if isinstance(data, dict) else []
-    messages = _within_window(messages, start_date, end_date)
-    if not messages:
-        if start_date and end_date:
+    if start_date and end_date:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if end_date < today:
             return (
-                f"<no StockTwits messages for ${ticker.upper()} within "
-                f"{start_date}..{end_date} (public stream serves only recent messages)>"
+                f"<no StockTwits sentiment for ${ticker.upper()} within "
+                f"{start_date}..{end_date} "
+                "(official sentiment API is current-state only)>"
             )
-        return f"<no StockTwits messages found for ${ticker.upper()}>"
 
-    lines = []
-    bullish = bearish = unlabeled = 0
-    for m in messages[:limit]:
-        created = m.get("created_at", "")
-        user = (m.get("user") or {}).get("username", "?")
-        entities = m.get("entities") or {}
-        sentiment_obj = entities.get("sentiment") or {}
-        sentiment = sentiment_obj.get("basic") if isinstance(sentiment_obj, dict) else None
-        body = (m.get("body") or "").replace("\n", " ").strip()
-        if len(body) > 280:
-            body = body[:280] + "…"
+    if _firestream_credentials() is None:
+        return "<stocktwits unavailable: official API credentials not configured>"
 
-        if sentiment == "Bullish":
-            bullish += 1
-            tag = "Bullish"
-        elif sentiment == "Bearish":
-            bearish += 1
-            tag = "Bearish"
-        else:
-            unlabeled += 1
-            tag = "no-label"
-        lines.append(f"[{created} · @{user} · {tag}] {body}")
-
-    total = bullish + bearish + unlabeled
-    bull_pct = round(100 * bullish / total) if total else 0
-    bear_pct = round(100 * bearish / total) if total else 0
-    summary = (
-        f"Bullish: {bullish} ({bull_pct}%) · "
-        f"Bearish: {bearish} ({bear_pct}%) · "
-        f"Unlabeled: {unlabeled} · "
-        f"Total: {total} most-recent messages"
-    )
-    return summary + "\n\n" + "\n".join(lines)
+    result = _fetch_authenticated_sentiment(ticker, timeout)
+    if result is None:
+        return "<stocktwits unavailable: authenticated API request failed>"
+    return result

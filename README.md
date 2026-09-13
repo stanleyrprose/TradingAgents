@@ -234,6 +234,18 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
+### Optional data credentials
+
+Live macro and social enrichment can use local environment variables (a project `.env` is loaded automatically):
+
+```bash
+FRED_API_KEY=...
+STOCKTWITS_USERNAME=...
+STOCKTWITS_PASSWORD=...
+```
+
+`FRED_API_KEY` enables the existing FRED macro vendor. StockTwits credentials are used only with the official authenticated Firestream Sentiment V2 API; the legacy unauthenticated symbol stream is not used as an automated fallback. Do not commit `.env` or credentials to Git.
+
 ## Persistence and Recovery
 
 TradingAgents persists two kinds of state across runs.
@@ -260,6 +272,121 @@ config = DEFAULT_CONFIG.copy()
 config["checkpoint_enabled"] = True
 ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
+```
+
+### Option position registry and trade journal
+
+Long US equity-option positions can be persisted separately from LangGraph checkpoints. The default registry is `~/.tradingagents/positions/options.sqlite3`; override it with `TRADINGAGENTS_OPTION_REGISTRY_DB` or `--db`. The registry keeps a mutable current-position projection plus an append-only SQLite event journal.
+
+Record actual execution facts explicitly:
+
+```bash
+# Opening fill
+.venv/bin/python scripts/options_registry.py open AAPL260925C00320000 \
+  --entry-premium 8.25 --contracts 2 --entry-date 2026-09-11 \
+  --take-profit-pct 50 --stop-loss-pct 40 --thesis-direction bullish
+
+# Later actual roll fill: old leg sold at 11, replacement bought at 15
+.venv/bin/python scripts/options_registry.py roll AAPL \
+  --new-symbol AAPL261016C00320000 \
+  --close-credit 11 --new-entry-premium 15 --date 2026-09-20
+
+# Actual close fill
+.venv/bin/python scripts/options_registry.py close AAPL \
+  --close-premium 17 --date 2026-10-10
+```
+
+After a roll, the registry deliberately keeps three distinct values: the immutable original entry premium, the current-leg entry premium, and cumulative lifecycle net premium. This prevents prior realized roll cashflows from disappearing from lifecycle breakeven and scenario analysis.
+
+A registered open position can be managed without retyping its current OCC symbol, contracts, cost basis, or stored exit policy:
+
+```bash
+.venv/bin/python scripts/manage_options.py AAPL --resolve-only
+.venv/bin/python scripts/manage_options.py AAPL
+.venv/bin/python scripts/manage_options.py AAPL --refresh-thesis --plan-roll
+```
+
+Underlying lookup fails closed when multiple open positions match; use the position ID in that case. Analysis and roll planning never record an execution event automatically. Only explicit `options_registry.py open`, `roll`, or `close` commands record trade fills. Stored Greek limits remain part of the auditable journal in v1.8, but the existing-position manager does not silently re-enforce them.
+
+The daily portfolio dashboard refreshes every open registered position in one deterministic book view:
+
+```bash
+.venv/bin/python scripts/options_dashboard.py
+.venv/bin/python scripts/options_dashboard.py --underlying AAPL
+.venv/bin/python scripts/options_dashboard.py --json
+```
+
+The dashboard batches Cboe requests by underlying, so multiple AAPL option positions share one delayed option-chain request instead of fetching the same chain once per contract. Positions are ordered by explicit lifecycle state only: `EXIT`, `REVIEW`, `HOLD`, then `REPORT_ONLY`, with shorter DTE first inside the same state. `EXIT` requires a stored exit-policy trigger; `REVIEW` means market data or a stored policy check is unavailable; `HOLD` means a stored exit policy exists and no condition is triggered; `REPORT_ONLY` means no exit policy was stored. This is deterministic triage, not a hidden weighted score or expected-return ranking.
+
+Book P/L keeps current-leg and cumulative lifecycle economics separate. Greek exposure is aggregated only within the same underlying; share deltas from unrelated underlyings are never netted together. If any open leg lacks current market data, strict book totals are reported unavailable rather than silently summing a partial book.
+
+Optional portfolio-level risk policy is stored next to the registry as `options_policy.json` (or override with `TRADINGAGENTS_OPTION_PORTFOLIO_POLICY` / `--policy`). No limits exist until you explicitly save them:
+
+```bash
+.venv/bin/python scripts/options_policy.py set \
+  --max-book-liquidation-value 10000 \
+  --max-book-gross-theta-dollars-per-day 100 \
+  --max-underlying-abs-delta-shares 150 \
+  --max-underlying-gross-delta-shares 250
+
+.venv/bin/python scripts/options_policy.py show
+.venv/bin/python scripts/options_dashboard.py
+```
+
+`options_policy.py set` replaces the complete saved policy rather than silently retaining omitted caps. Dashboard policy checks are only `BREACH`, `OK`, or `NOT_EVALUABLE`; there is no hidden portfolio-risk score. Full-book caps are deliberately `NOT_EVALUABLE` when `options_dashboard.py --underlying ...` is used because a filtered subset must not impersonate the whole book. The dashboard also prints a deterministic Daily Action Queue containing only explicit position exits, portfolio-policy breaches/unavailable checks, and position reviews. Queue entries are review tasks only and never execute a trade, hedge, close, or roll automatically.
+
+Daily operations can compress that queue into a short notification. Preview is the default and has no Telegram side effect:
+
+```bash
+.venv/bin/python scripts/options_daily_ops.py
+.venv/bin/python scripts/options_daily_ops.py --json
+```
+
+Telegram delivery requires an explicit `--send` plus either `TRADINGAGENTS_TG_BOT_TOKEN=[REDACTED_SECRET]` and `TRADINGAGENTS_TG_CHAT_ID=<chat_id>` in the process environment, or a secure `--telegram-config` file. If the action queue is empty, nothing is sent even with `--send`. Successful deliveries write a local `options_daily_ops_receipts.json` receipt containing only an action fingerprint, hashed delivery target, provider message ID, and timestamp; credentials are never persisted in the receipt. An identical successful message to the same target is deduplicated, while `--force` explicitly bypasses deduplication. Planning and notification never mutate the trade journal or execute orders.
+
+For unattended macOS operation, the launchd helper stores Telegram credentials separately from the plist and requires file permissions `0600` or stricter. The token/chat ID are never embedded in the LaunchAgent. Production execution is installed outside the Git checkout under `~/.tradingagents/options-runtime/`:
+
+```text
+~/.tradingagents/options-runtime/
+├── releases/<git-sha>/app/       # read-only git archive
+├── envs/<dependency-hash>/venv/  # production-owned dependency environment
+├── current -> releases/<sha>
+├── previous -> releases/<sha>
+└── bin/
+    ├── options-daily-runner      # stable 22:00 Daily Ops entrypoint
+    └── options-watchdog-runner   # stable 23:00 watchdog entrypoint
+```
+
+Install only a clean Git revision that matches its configured upstream, validate it, then bind launchd to the stable runtime runner:
+
+```bash
+.venv/bin/python scripts/options_runtime.py install
+.venv/bin/python scripts/options_runtime.py list
+.venv/bin/python scripts/options_daily_scheduler.py configure-telegram
+.venv/bin/python scripts/options_daily_scheduler.py install
+.venv/bin/python scripts/options_watchdog_scheduler.py install
+.venv/bin/python scripts/options_runtime.py health
+```
+
+`options_runtime.py install` snapshots `HEAD` with `git archive`, copies the current verified dependency environment into a production-owned venv keyed by a dependency fingerprint, removes the editable TradingAgents link back to the development checkout, makes the release `app/` tree read-only, and atomically switches `current`. Different code revisions with the same Python/dependency set reuse one production environment rather than duplicating it. `options_runtime.py rollback` switches back to `previous` (or `--to <sha-prefix>`), and `options_runtime.py prune --keep 3` removes only inactive old releases while preserving `current` and `previous`.
+
+The production scheduler runs Monday-Friday at **22:00 Mac local time** by default. This time intentionally overlaps regular US equity-option market hours in both US daylight and standard time when the Mac remains on Myanmar time. Daily Ops derives its default market date from `America/New_York`, not the Mac calendar date, and Cboe snapshots fail closed when the source timestamp date does not match that US market date. Standard recurring NYSE full-day holidays are detected locally and short-circuit as `MARKET_CLOSED` without Cboe or Telegram side effects; rare one-off exchange closures remain fail-closed events. Production scheduled runs append a `0600` structured run-history record with market date, timestamps, success/failure, exit code, delivery status, and action count. Manual/preview runs do not write that production history unless `--scheduled-run` is explicitly supplied.
+
+A separate watchdog LaunchAgent runs Monday-Friday at **23:00 Mac local time**. It checks the structured run history, hardened-runtime health, the production Daily Ops plist binding, and whether the Daily Ops launchd label is loaded. Healthy days are silent; missing/failed runs produce a concise Telegram alert through the same secure credential file, with independent alert deduplication. On standard US market holidays the watchdog exits `MARKET_CLOSED` silently. The watchdog itself is launched from a second hardened runtime runner rather than the development checkout, so a broken Daily Ops process cannot self-report as healthy.
+
+The scheduler defaults to the hardened runtime and refuses installation when its stable runner is missing. `install --source-checkout` on the Daily Scheduler is retained only for bounded development/launchd smoke tests. `options_runtime.py health` checks the active release, both runtime runners, production dependency environment, Daily Ops LaunchAgent binding, scheduled-run recording, SEND mode, credential-file indirection, absence of Telegram secrets in plist environment variables, and whether launchd currently has the production Daily Ops label loaded.
+
+Operational commands:
+
+```bash
+.venv/bin/python scripts/options_runtime.py health
+.venv/bin/python scripts/options_runtime.py rollback
+.venv/bin/python scripts/options_runtime.py rollback --to <sha-prefix>
+.venv/bin/python scripts/options_runtime.py prune --keep 3
+.venv/bin/python scripts/options_daily_scheduler.py status
+.venv/bin/python scripts/options_watchdog_scheduler.py status
+.venv/bin/python scripts/options_daily_scheduler.py uninstall
+.venv/bin/python scripts/options_watchdog_scheduler.py uninstall
 ```
 
 ## Reproducibility

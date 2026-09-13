@@ -20,4 +20,21 @@ def test_market_toolnode_can_execute_verified_snapshot():
         "registered in the market ToolNode, so the model's call fails."
     )
     # the other core market tools must remain too
-    assert {"get_stock_data", "get_indicators"} <= market_tools
+    assert {
+        "get_stock_data",
+        "get_indicators",
+        "get_equity_option_context",
+    } <= market_tools
+
+
+@pytest.mark.unit
+def test_news_toolnode_registers_cross_asset_and_core_news_tools():
+    nodes = TradingAgentsGraph._create_tool_nodes(None)
+    news_tools = set(nodes["news"].tools_by_name)
+
+    assert {
+        "get_cross_asset_context",
+        "get_macro_indicators",
+        "get_news",
+        "get_global_news",
+    } <= news_tools
