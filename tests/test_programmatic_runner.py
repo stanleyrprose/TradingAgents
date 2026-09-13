@@ -1,3 +1,4 @@
+import json
 import runpy
 from unittest.mock import MagicMock, patch
 
@@ -48,6 +49,37 @@ def test_runner_preserves_occ_identity_and_passes_underlying_as_analysis_proxy()
     graph.save_reports.assert_called_once_with(
         {"state": "complete"}, "AAPL260918C00200000"
     )
+
+
+def test_runner_writes_machine_readable_decision_contract(tmp_path):
+    graph = MagicMock()
+    graph.propagate.return_value = ({"state": "complete"}, "Hold")
+    report_path = tmp_path / "report" / "complete_report.md"
+    graph.save_reports.return_value = str(report_path)
+    decision_json = tmp_path / "bridge" / "decision.json"
+
+    with patch(
+        "sys.argv",
+        [
+            "run_tradingagents.py",
+            "ETH-USD",
+            "--date",
+            "2026-09-13",
+            "--decision-json",
+            str(decision_json),
+        ],
+    ), patch(
+        "tradingagents.graph.trading_graph.TradingAgentsGraph", return_value=graph
+    ):
+        assert _load_runner()["main"]() == 0
+
+    payload = json.loads(decision_json.read_text(encoding="utf-8"))
+    assert payload["contract_version"] == "tradingagents-decision-v1"
+    assert payload["analysis_date"] == "2026-09-13"
+    assert payload["canonical_symbol"] == "ETH-USD"
+    assert payload["decision"] == "Hold"
+    assert payload["decision_normalized"] == "HOLD"
+    assert payload["report_path"] == str(report_path)
 
 
 def test_runner_accepts_legacy_bond_type(capsys):
