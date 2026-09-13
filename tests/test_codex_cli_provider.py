@@ -1,9 +1,11 @@
 """Tests for the optional Codex CLI / ChatGPT OAuth provider."""
 
 import json
+import signal
+import subprocess
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -41,7 +43,7 @@ def test_codex_cli_command_security_and_sanitized_environment(monkeypatch):
             handle.write("CODEX_ADAPTER_OK")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_codex", fake_run)
 
     llm = create_llm_client(
         provider="codex_cli",
@@ -73,6 +75,97 @@ def test_codex_cli_command_security_and_sanitized_environment(monkeypatch):
     assert set(captured["env"]) <= {
         "HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "CODEX_HOME"
     }
+
+
+@pytest.mark.unit
+def test_codex_cli_timeout_kills_process_group_and_reaps_child(monkeypatch):
+    from tradingagents.llm_clients import codex_cli_client as module
+
+    events = []
+    popen_kwargs = {}
+
+    class FakeProcess:
+        pid = 4321
+        returncode = -signal.SIGKILL
+
+        def communicate(self, input=None, timeout=None):
+            events.append(("communicate", input, timeout))
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            return "", ""
+
+    def fake_popen(cmd, **kwargs):
+        popen_kwargs.update(kwargs)
+        return FakeProcess()
+
+    def fake_killpg(process_group_id, sig):
+        events.append(("killpg", process_group_id, sig))
+
+    monkeypatch.setattr(module, "_use_process_group_cleanup", lambda: True)
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module.os, "killpg", fake_killpg)
+
+    llm = create_llm_client(
+        provider="codex_cli",
+        model="gpt-test",
+        timeout_seconds=7,
+    ).get_llm()
+
+    with pytest.raises(TimeoutError, match="reasoning call exceeded 7s"):
+        llm.invoke("Analyze only the supplied evidence.")
+
+    assert popen_kwargs["start_new_session"] is True
+    assert events == [
+        ("communicate", ANY, 7),
+        ("killpg", 4321, signal.SIGKILL),
+        ("communicate", None, None),
+    ]
+
+
+@pytest.mark.unit
+def test_codex_cli_timeout_kills_direct_process_on_non_posix(monkeypatch):
+    from tradingagents.llm_clients import codex_cli_client as module
+
+    events = []
+    popen_kwargs = {}
+
+    class FakeProcess:
+        pid = 4321
+        returncode = 1
+
+        def communicate(self, input=None, timeout=None):
+            events.append(("communicate", input, timeout))
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            return "", ""
+
+        def kill(self):
+            events.append(("kill",))
+
+    def fake_popen(cmd, **kwargs):
+        popen_kwargs.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(module, "_use_process_group_cleanup", lambda: False)
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        module._run_codex(
+            ["codex"],
+            input="prompt",
+            text=True,
+            capture_output=True,
+            timeout=7,
+            env={},
+            check=False,
+        )
+
+    assert "start_new_session" not in popen_kwargs
+    assert events == [
+        ("communicate", "prompt", 7),
+        ("kill",),
+        ("communicate", None, None),
+    ]
 
 
 @tool
@@ -109,7 +202,7 @@ def test_bound_tools_use_output_schema_and_return_langgraph_tool_calls(monkeypat
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_codex", fake_run)
     llm = create_llm_client(provider="codex_cli", model="gpt-test").get_llm()
     response = llm.bind_tools([lookup_price]).invoke(
         [
@@ -165,7 +258,7 @@ def test_unavailable_tool_call_is_rejected(monkeypatch):
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_codex", fake_run)
     llm = create_llm_client(provider="codex_cli", model="gpt-test").get_llm()
     with pytest.raises(RuntimeError, match="unavailable tool call"):
         llm.bind_tools([lookup_price]).invoke("Get a price")
@@ -200,7 +293,7 @@ def test_structured_output_pydantic_schema_with_mocked_subprocess(monkeypatch):
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_codex", fake_run)
     llm = create_llm_client(provider="codex_cli", model="gpt-test").get_llm()
     result = llm.with_structured_output(TradeDecision).invoke("Decide")
 
@@ -314,7 +407,7 @@ def test_codex_cli_failure_does_not_echo_prompt(monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_codex", fake_run)
 
     llm = create_llm_client(
         provider="codex_cli",
