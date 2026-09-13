@@ -6,7 +6,6 @@ from pathlib import Path
 
 from tradingagents.instrument_router import PRIMARY_TYPES, classify_instrument
 
-
 DECISION_CONTRACT_VERSION = "tradingagents-decision-v1"
 
 
