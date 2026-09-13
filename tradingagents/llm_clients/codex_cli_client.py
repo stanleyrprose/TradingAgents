@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -165,6 +167,52 @@ def _classify_codex_failure(stderr: str) -> str:
     return "Codex CLI returned a non-zero exit status; inspect local Codex logs for details."
 
 
+def _use_process_group_cleanup() -> bool:
+    return os.name == "posix"
+
+
+def _run_codex(
+    cmd: list[str],
+    *,
+    input: str,
+    text: bool,
+    capture_output: bool,
+    timeout: int,
+    env: dict[str, str],
+    check: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Run Codex and reap it, including its process group where supported."""
+    use_process_group = _use_process_group_cleanup()
+    popen_kwargs: dict[str, Any] = {}
+    if use_process_group:
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=text,
+        env=env,
+        **popen_kwargs,
+    )
+    try:
+        stdout, stderr = process.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if use_process_group:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        process.communicate()
+        raise
+
+    completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+    if check:
+        completed.check_returncode()
+    return completed
+
+
 class CodexCLIChatModel(BaseChatModel):
     """Minimal synchronous LangChain chat model backed by ``codex exec``."""
 
@@ -247,7 +295,7 @@ class CodexCLIChatModel(BaseChatModel):
             cmd.extend(["-o", str(output_path), "-"])
 
             try:
-                completed = subprocess.run(
+                completed = _run_codex(
                     cmd,
                     input=prompt,
                     text=True,
